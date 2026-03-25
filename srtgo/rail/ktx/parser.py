@@ -88,7 +88,7 @@ def parse_tickets(raw: str) -> list[Ticket]:
     except NoResultsError:
         return []
     tickets = [parse_ticket(info) for info in j.get("reservation_list", [])]
-    logger.debug("티켓 파싱: count=%d", len(tickets))
+    logger.debug("티켓 파싱: count=%s", len(tickets))
     return tickets
 
 
@@ -107,7 +107,7 @@ def parse_seats(raw: str) -> tuple[list[Seat], str | None]:
     if jrny_info := j.get("jrny_infos", {}).get("jrny_info", []):
         if seat_info := jrny_info[0].get("seat_infos", {}).get("seat_info", []):
             seats = [Seat(s) for s in seat_info]
-    logger.debug("좌석 파싱: count=%d", len(seats))
+    logger.debug("좌석 파싱: count=%s", len(seats))
     return seats, wct_no
 
 
@@ -134,7 +134,7 @@ def parse_reservations(raw: str) -> list[Reservation]:
     for info in j.get("jrny_infos", {}).get("jrny_info", []):
         for tinfo in info.get("train_infos", {}).get("train_info", []):
             reservations.append(parse_reservation(tinfo))
-    logger.debug("예약 파싱: count=%d", len(reservations))
+    logger.debug("예약 파싱: count=%s", len(reservations))
     return reservations
 
 

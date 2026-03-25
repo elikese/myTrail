@@ -386,7 +386,7 @@ class Korail(AbstractRail):
 
         counts = {
             "adult": sum(p.count for p in passengers if isinstance(p, AdultPassenger)),
-            "child": sum(p.count for p in passengers if isinstance(p, type(p) and p.typecode == "3" and p.discount_type == "000")),
+            "child": sum(p.count for p in passengers if p.typecode == "3" and p.discount_type == "000"),
             "senior": sum(p.count for p in passengers if p.discount_type == "131"),
             "disability1to3": sum(p.count for p in passengers if p.discount_type == "111"),
             "disability4to6": sum(p.count for p in passengers if p.discount_type == "112"),

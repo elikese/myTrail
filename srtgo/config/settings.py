@@ -5,6 +5,31 @@ import keyring
 import keyring.errors
 
 
+def _configure_keyring_backend() -> None:
+    """헤드리스 환경(Ubuntu/Termux proot)에서 keyrings.alt로 자동 폴백."""
+    try:
+        keyring.set_password("_srtgo_probe", "_k", "_v")
+        result = keyring.get_password("_srtgo_probe", "_k")
+        if result == "_v":
+            try:
+                keyring.delete_password("_srtgo_probe", "_k")
+            except Exception:
+                pass
+            return  # 정상 동작하는 백엔드 있음
+    except Exception:
+        pass
+
+    # GUI 키링 없음 → keyrings.alt 파일 기반으로 폴백
+    try:
+        from keyrings.alt.file import PlaintextKeyring
+        keyring.set_keyring(PlaintextKeyring())
+    except ImportError:
+        pass  # keyrings.alt 미설치 시 keyring 오류는 런타임에 발생
+
+
+_configure_keyring_backend()
+
+
 def get_setting(service: str, key: str) -> str | None:
     return keyring.get_password(service, key)
 

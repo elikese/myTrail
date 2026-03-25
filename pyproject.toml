@@ -16,15 +16,20 @@ classifiers = [
 ]
 dependencies = [
     "click",
-    "curl_cffi",
     "requests",
-    "tls-client",
     "inquirer>=3.4",
     "keyring",
+    "keyrings.alt",
     "PyCryptodome",
     "prompt_toolkit>=3",
     "python-telegram-bot",
-    "termcolor"
+    "termcolor",
+]
+
+[project.optional-dependencies]
+full = [
+    "curl_cffi",
+    "tls-client",
 ]
 dynamic = ["version"]
 [tool.setuptools_scm]
