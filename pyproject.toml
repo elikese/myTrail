@@ -27,6 +27,7 @@ dependencies = [
     "termcolor",
     "anthropic>=0.40",
     "cryptography>=42",
+    "python-dotenv>=1",
 ]
 
 [project.optional-dependencies]

@@ -14,6 +14,22 @@
 - `BOT_ALLOWED_IDS` — 콤마 구분 ID (예: `111111,222222`)
 - `BOT_USERS_DIR` — 자격증명 디렉토리 (기본: `data/users`)
 
+## 로컬 실행 (`.env` 자동 로드)
+프로젝트 루트에 `.env` 파일을 만들어두면 `srtgo-bot` 실행 시 자동으로 읽음 (python-dotenv).
+`.env`는 `.gitignore`에 등록돼 있음.
+
+`.env` 예시:
+```
+BOT_TOKEN=1234567890:AA...
+BOT_DB_KEY=wW2lFiec...
+BOT_ALLOWED_IDS=111111,222222
+```
+
+이후엔 그냥:
+```
+srtgo-bot
+```
+
 ## systemd 예시
 `/etc/systemd/system/srtgo-bot.service`:
 ```ini

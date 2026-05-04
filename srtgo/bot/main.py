@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 
+from dotenv import load_dotenv
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -16,6 +17,8 @@ from telegram.ext import (
 
 from . import handlers, storage
 from ..logging.setup import setup_logging
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
