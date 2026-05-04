@@ -173,3 +173,64 @@ async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_ke
     update.callback_query.edit_message_text.assert_called_once()
     text = update.callback_query.edit_message_text.call_args.args[0]
     assert "폴링" in text
+
+
+@pytest.mark.asyncio
+async def test_pay_confirm_charges_card(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage, session as session_mod
+    storage._reset_cipher_for_tests()
+    handlers._SESSION = session_mod.Session()
+
+    storage.save(111, {
+        "claude_key": "sk",
+        "srt": None, "ktx": None,
+        "card": {"number": "n", "password": "p", "birthday": "b", "expire": "e"},
+    })
+
+    rail = MagicMock()
+    rail.pay_with_card.return_value = True
+    reservation = MagicMock()
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:confirm"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
+    rail.pay_with_card.assert_called_once_with(reservation,
+        {"number": "n", "password": "p", "birthday": "b", "expire": "e"})
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    assert "결제 완료" in text
+    assert handlers._SESSION.get_pending(111) is None
+
+
+@pytest.mark.asyncio
+async def test_pay_cancel_calls_rail_cancel(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage, session as session_mod
+    storage._reset_cipher_for_tests()
+    handlers._SESSION = session_mod.Session()
+    storage.save(111, {"claude_key": "sk", "srt": None, "ktx": None,
+                       "card": {"number": "n", "password": "p",
+                                "birthday": "b", "expire": "e"}})
+
+    rail = MagicMock()
+    reservation = MagicMock()
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:cancel"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
+    rail.cancel.assert_called_once_with(reservation)
+    assert handlers._SESSION.get_pending(111) is None

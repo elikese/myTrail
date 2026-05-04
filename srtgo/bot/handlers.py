@@ -311,3 +311,52 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _SESSION.start_poll(tid, task, cancel_event)
     context.user_data.pop("search", None)
     await cq.edit_message_text("폴링 시작. 좌석 잡히면 알림 드립니다.")
+
+
+from ..service import payment as svc_pay
+
+
+async def on_payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
+        return
+
+    rail = pending["rail"]
+    reservation = pending["reservation"]
+
+    if cq.data == "pay:cancel":
+        try:
+            await asyncio.to_thread(rail.cancel, reservation)
+        except Exception as e:
+            logger.error("예약 취소 실패: %s", e)
+        _SESSION.clear_pending(tid)
+        await cq.edit_message_text("예약 취소됨.")
+        return
+
+    # pay:confirm
+    creds = storage.load(tid)
+    card = creds.get("card") if creds else None
+    if not card:
+        await cq.edit_message_text("카드 정보 없음. /setup 다시.")
+        return
+
+    try:
+        ok = await asyncio.to_thread(
+            svc_pay.pay_with_saved_card, rail, reservation, card
+        )
+    except Exception as e:
+        logger.error("결제 예외: %s", e)
+        await cq.edit_message_text(f"결제 실패: {e}")
+        _SESSION.clear_pending(tid)
+        return
+
+    _SESSION.clear_pending(tid)
+    if ok:
+        await cq.edit_message_text("결제 완료. 승차권은 SRT/코레일 앱에서 확인해주세요.")
+    else:
+        await cq.edit_message_text("결제 실패 (카드 정보 확인 필요).")
