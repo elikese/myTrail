@@ -1,4 +1,3 @@
-import os
 import pytest
 
 
@@ -13,7 +12,7 @@ def tmp_user_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fernet_key(monkeypatch):
-    """테스트용 고정 Fernet 키."""
+    """테스트용 임시 Fernet 키."""
     from cryptography.fernet import Fernet
     key = Fernet.generate_key().decode()
     monkeypatch.setenv("BOT_DB_KEY", key)
