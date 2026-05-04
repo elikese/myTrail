@@ -9,10 +9,20 @@ PASSWORD_PATTERN = re.compile(
 
 
 class SensitiveDataFilter(logging.Filter):
+    """카드번호·비밀번호 패턴을 ****로 마스킹.
+
+    args를 stringify하지 않고 메시지 렌더 후 결과 문자열에만 마스킹을 적용한다.
+    이렇게 해야 %d/%f 같은 숫자 포매터가 깨지지 않고, float 표현이 우연히
+    16자리 숫자처럼 보여 카드번호로 오인되는 일도 막을 수 있다.
+    """
+
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = self._mask(str(record.msg))
-        if record.args:
-            record.args = tuple(self._mask(str(a)) for a in record.args)
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            return True   # 포매팅 자체가 깨졌다면 stdlib 로깅 핸들러가 보고
+        record.msg = self._mask(rendered)
+        record.args = ()
         return True
 
     def _mask(self, text: str) -> str:
