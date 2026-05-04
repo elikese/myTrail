@@ -1,9 +1,10 @@
-"""Claude API로 자연어를 intent JSON으로 파싱."""
+"""Claude API로 자연어를 intent JSON으로 파싱.
 
-import json
+tool use + 강제 tool_choice로 구조화된 출력을 보장한다.
+"""
+
 import logging
 
-import jsonschema
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
@@ -36,11 +37,19 @@ INTENT_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """당신은 한국 철도 예매 봇의 의도 파서입니다.
-사용자의 한국어 자연어 입력을 아래 JSON 스키마에 맞춰 변환합니다.
-오로지 JSON 객체 하나만 반환하고, 다른 텍스트는 절대 포함하지 마세요.
+TOOL_NAME = "submit_intent"
 
-스키마:
+INTENT_TOOL = {
+    "name": TOOL_NAME,
+    "description": "사용자가 요청한 한국 철도 예매 의도를 구조화해 제출한다.",
+    "input_schema": INTENT_SCHEMA,
+}
+
+SYSTEM_PROMPT = """당신은 한국 철도 예매 봇의 의도 파서입니다.
+사용자의 한국어 자연어 입력을 submit_intent 도구로 제출하세요.
+도구를 반드시 호출해야 하며, 다른 형태의 응답은 허용되지 않습니다.
+
+스키마 가이드:
 - rail: "SRT" | "KTX" (사용자가 명시 안 했고 추론 불가하면 "SRT" 기본)
 - dep, arr: 한국어 역명 (예: "부산", "서울", "동대구")
 - date: "YYYY-MM-DD" (상대 표현은 today 기준으로 환산)
@@ -53,7 +62,7 @@ today: {today}"""
 
 
 class ParseError(Exception):
-    """파싱 실패 (JSON 위반·스키마 위반·LLM 거부)."""
+    """파싱 실패 (tool 미호출·SDK 거부 등)."""
 
 
 def parse(
@@ -62,30 +71,29 @@ def parse(
     api_key: str,
     client: Anthropic | None = None,
 ) -> dict:
-    """자연어 → intent dict. JSON/스키마 위반 시 1회 재시도."""
+    """자연어 → intent dict. tool use로 스키마 보장."""
     if client is None:
         client = Anthropic(api_key=api_key)
 
     system = SYSTEM_PROMPT.format(today=today)
-    last_err: Exception | None = None
 
-    for attempt in range(2):
-        try:
-            resp = client.messages.create(
-                model=MODEL,
-                max_tokens=512,
-                system=[
-                    {"type": "text", "text": system,
-                     "cache_control": {"type": "ephemeral"}},
-                ],
-                messages=[{"role": "user", "content": text}],
-            )
-            raw = resp.content[0].text
-            data = json.loads(raw)
-            jsonschema.validate(data, INTENT_SCHEMA)
-            return data
-        except (json.JSONDecodeError, jsonschema.ValidationError) as e:
-            logger.warning("파싱 실패 (시도 %d): %s", attempt + 1, e)
-            last_err = e
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=[
+                {"type": "text", "text": system,
+                 "cache_control": {"type": "ephemeral"}},
+            ],
+            tools=[INTENT_TOOL],
+            tool_choice={"type": "tool", "name": TOOL_NAME},
+            messages=[{"role": "user", "content": text}],
+        )
+    except Exception as e:
+        raise ParseError(f"Claude API 호출 실패: {e}") from e
 
-    raise ParseError(f"intent 파싱 실패: {last_err}")
+    for block in resp.content:
+        if getattr(block, "type", None) == "tool_use" and block.name == TOOL_NAME:
+            return dict(block.input)
+
+    raise ParseError(f"tool_use 블록 미발견: {resp.content!r}")

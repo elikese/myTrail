@@ -1,19 +1,30 @@
-from unittest.mock import MagicMock, patch
-import json
+from unittest.mock import MagicMock
 
 import pytest
 
 
-def _mock_anthropic_response(intent_dict: dict):
-    """Anthropic SDK 응답 객체 mock — content[0].text가 JSON 문자열."""
+def _mock_tool_use_response(intent_dict: dict, tool_name: str = "submit_intent"):
+    """Anthropic SDK 응답 mock — tool_use 블록을 반환."""
     msg = MagicMock()
     block = MagicMock()
-    block.text = json.dumps(intent_dict)
+    block.type = "tool_use"
+    block.name = tool_name
+    block.input = intent_dict
     msg.content = [block]
     return msg
 
 
-def test_parse_basic_korean(monkeypatch):
+def _mock_text_only_response(text: str):
+    """tool_use 없이 텍스트만 반환하는 비정상 응답."""
+    msg = MagicMock()
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    msg.content = [block]
+    return msg
+
+
+def test_parse_basic_korean():
     from srtgo.bot import parser
 
     intent = {
@@ -27,7 +38,7 @@ def test_parse_basic_korean(monkeypatch):
         "needs_clarification": [],
     }
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = _mock_anthropic_response(intent)
+    fake_client.messages.create.return_value = _mock_tool_use_response(intent)
 
     result = parser.parse(
         text="내일 오후 6시 부산에서 서울 KTX",
@@ -37,34 +48,31 @@ def test_parse_basic_korean(monkeypatch):
     )
     assert result == intent
 
-
-def test_parse_invalid_json_retries_once_then_raises(monkeypatch):
-    from srtgo.bot import parser
-
-    bad = MagicMock()
-    bad_block = MagicMock()
-    bad_block.text = "this is not json"
-    bad.content = [bad_block]
-
-    fake_client = MagicMock()
-    fake_client.messages.create.return_value = bad
-
-    with pytest.raises(parser.ParseError):
-        parser.parse(text="???", today="2026-05-04", api_key="sk", client=fake_client)
-
-    # 1회 재시도 = 총 2회 호출
-    assert fake_client.messages.create.call_count == 2
+    # tool_choice가 강제됐는지 확인
+    call_kwargs = fake_client.messages.create.call_args.kwargs
+    assert call_kwargs["tool_choice"] == {"type": "tool", "name": "submit_intent"}
+    assert call_kwargs["tools"][0]["name"] == "submit_intent"
 
 
-def test_parse_schema_violation_raises():
+def test_parse_no_tool_use_block_raises():
+    """모델이 tool 호출 안 하고 텍스트만 보내면 ParseError."""
     from srtgo.bot import parser
 
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = _mock_anthropic_response(
-        {"rail": "INVALID", "dep": "x"}  # 필수 필드 누락
-    )
+    fake_client.messages.create.return_value = _mock_text_only_response("그냥 답변")
 
-    with pytest.raises(parser.ParseError):
+    with pytest.raises(parser.ParseError, match="tool_use"):
+        parser.parse(text="x", today="2026-05-04", api_key="sk", client=fake_client)
+
+
+def test_parse_sdk_error_wrapped():
+    """SDK 예외는 ParseError로 래핑."""
+    from srtgo.bot import parser
+
+    fake_client = MagicMock()
+    fake_client.messages.create.side_effect = RuntimeError("network down")
+
+    with pytest.raises(parser.ParseError, match="Claude API"):
         parser.parse(text="x", today="2026-05-04", api_key="sk", client=fake_client)
 
 
@@ -82,7 +90,7 @@ def test_parse_propagates_needs_clarification():
         "needs_clarification": ["time"],
     }
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = _mock_anthropic_response(intent)
+    fake_client.messages.create.return_value = _mock_tool_use_response(intent)
 
     result = parser.parse("부산 서울 SRT", today="2026-05-04", api_key="sk", client=fake_client)
     assert result["needs_clarification"] == ["time"]

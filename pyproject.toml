@@ -27,7 +27,6 @@ dependencies = [
     "termcolor",
     "anthropic>=0.40",
     "cryptography>=42",
-    "jsonschema>=4",
 ]
 
 [project.optional-dependencies]
