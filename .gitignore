@@ -177,3 +177,4 @@ token.json
 auth.json
 .env.*
 !.env.example
+data/
