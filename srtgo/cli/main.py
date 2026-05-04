@@ -70,7 +70,7 @@ def srtgo(debug: bool = False) -> None:
 def _run_with_login(rail_type: str, debug: bool, handler) -> None:
     """로그인 후 handler(rail, rail_type) 호출."""
     try:
-        rail = create_rail(rail_type, debug)
+        rail = create_rail(rail_type, debug=debug)
     except ValueError as e:
         print(str(e))
         if inquirer.confirm(message="지금 로그인 설정하시겠습니까", default=True):

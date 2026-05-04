@@ -14,6 +14,7 @@ license = {text = "MIT License"}
 classifiers = [
     "Programming Language :: Python :: 3",
 ]
+dynamic = ["version"]
 dependencies = [
     "click",
     "requests",
@@ -24,6 +25,8 @@ dependencies = [
     "prompt_toolkit>=3",
     "python-telegram-bot",
     "termcolor",
+    "anthropic>=0.40",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +34,12 @@ full = [
     "curl_cffi",
     "tls-client",
 ]
-dynamic = ["version"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "freezegun>=1.5",
+]
+
 [tool.setuptools_scm]
 fallback_version = "0.0.1"
 
@@ -40,3 +48,8 @@ Homepage = "https://github.com/lapis42/srtgo"
 
 [project.scripts]
 srtgo = "srtgo.cli.main:srtgo"
+srtgo-bot = "srtgo.bot.main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

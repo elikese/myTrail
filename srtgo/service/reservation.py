@@ -5,6 +5,7 @@ AbstractRail만 받음 — SRT/KTX 구체 타입 참조 금지.
 """
 
 import logging
+import threading
 import time
 from random import gammavariate
 
@@ -44,10 +45,14 @@ def is_seat_available(train, seat_option) -> bool:
         return train.has_special_seat()
 
 
-def _sleep() -> None:
+def _sleep(cancel_event: threading.Event | None = None) -> None:
     interval = gammavariate(RESERVE_INTERVAL_SHAPE, RESERVE_INTERVAL_SCALE) + RESERVE_INTERVAL_MIN
     logger.debug("슬립: %.2fs", interval)
-    time.sleep(interval)
+    if cancel_event is None:
+        time.sleep(interval)
+    else:
+        # Event.wait는 set 시 즉시 반환, timeout 만료 시에도 반환
+        cancel_event.wait(timeout=interval)
 
 
 def poll_and_reserve(
@@ -57,6 +62,7 @@ def poll_and_reserve(
     seat_option,
     on_success,
     on_error,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """폴링 루프.
 
@@ -67,11 +73,16 @@ def poll_and_reserve(
         seat_option: SeatType 또는 ReserveOption
         on_success: (reservation) → None 콜백 — 성공 시 호출
         on_error: (exception) → bool 콜백 — True면 계속, False면 중단
+        cancel_event: set() 시 다음 루프 진입 시점에 폴링 종료 (None이면 무한 폴링)
     """
     i_try = 0
     start_time = time.time()
 
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("cancel_event 감지 — 폴링 종료")
+            return
+
         i_try += 1
         elapsed = time.time() - start_time
         logger.debug("예매 시도 #%d (경과: %.0fs)", i_try, elapsed)
@@ -84,11 +95,11 @@ def poll_and_reserve(
                     reservation = rail.reserve(trains[idx], option=seat_option)
                     on_success(reservation)
                     return
-            _sleep()
+            _sleep(cancel_event)
 
         except Exception as e:
             logger.error("예매 폴링 중 오류: %s", e, exc_info=True)
             should_continue = on_error(e)
             if not should_continue:
                 return
-            _sleep()
+            _sleep(cancel_event)

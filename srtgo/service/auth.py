@@ -12,9 +12,19 @@ from ..config.settings import get_rail_credential, set_rail_credential
 logger = logging.getLogger(__name__)
 
 
-def create_rail(rail_type: str, debug: bool = False) -> AbstractRail:
-    """rail_type에 따라 SRT 또는 Korail 인스턴스 반환 — 유일한 분기점."""
-    user_id, password = get_rail_credential(rail_type)
+def create_rail(
+    rail_type: str,
+    credentials: dict | None = None,
+    debug: bool = False,
+) -> AbstractRail:
+    """rail_type에 따라 SRT 또는 Korail 인스턴스 반환 — 유일한 분기점.
+
+    credentials: {"id": str, "pw": str}. None이면 keyring에서 fallback.
+    """
+    if credentials is not None:
+        user_id, password = credentials["id"], credentials["pw"]
+    else:
+        user_id, password = get_rail_credential(rail_type)
     if not user_id or not password:
         raise ValueError(f"{rail_type} 자격증명이 설정되지 않았습니다")
 
@@ -32,7 +42,7 @@ def ensure_login(rail: AbstractRail, rail_type: str, debug: bool = False) -> Abs
         return rail
     logger.warning("세션 만료 감지, 재로그인 시도: rail_type=%s", rail_type)
     try:
-        new_rail = create_rail(rail_type, debug)
+        new_rail = create_rail(rail_type, debug=debug)
         logger.info("재로그인 성공: rail_type=%s", rail_type)
         return new_rail
     except Exception as e:
