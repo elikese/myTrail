@@ -8,9 +8,10 @@ from ..config.settings import get_card_info
 logger = logging.getLogger(__name__)
 
 
-def pay_with_saved_card(rail: AbstractRail, reservation) -> bool:
-    """저장된 카드 정보로 결제. 카드 미설정 시 False 반환."""
-    card_info = get_card_info()
+def pay_with_saved_card(rail: AbstractRail, reservation, card_info: dict | None = None) -> bool:
+    """카드 결제. card_info=None이면 keyring fallback. 카드 없으면 False."""
+    if card_info is None:
+        card_info = get_card_info()
     if not card_info:
         logger.debug("카드 정보 미설정 — 결제 건너뜀")
         return False
