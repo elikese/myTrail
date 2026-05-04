@@ -170,7 +170,7 @@ async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_ke
 
     update.callback_query.edit_message_text.assert_called_once()
     text = update.callback_query.edit_message_text.call_args.args[0]
-    assert "폴링" in text
+    assert "예약" in text
 
 
 @pytest.mark.asyncio

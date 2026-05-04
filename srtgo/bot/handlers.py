@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = (
     "사용법:\n"
     "/setup — 자격증명 등록 (Claude API 키, 철도사 ID/PW, 카드)\n"
-    "/cancel — 진행 중 폴링·예약 취소\n"
+    "/cancel — 진행 중 예약 시도·예약 취소\n"
     "/help — 도움말\n\n"
     "그 외에는 자유롭게 말하세요. 예: '내일 오후 6시 부산에서 서울 KTX'"
 )
@@ -163,10 +163,16 @@ def _seat_option_from_intent(rail_type: str, pref: str):
         return getattr(ReserveOption, pref)   # ReserveOption은 일반 class (str 상수)
 
 
-def _train_keyboard(trains: list) -> InlineKeyboardMarkup:
+def _train_keyboard(n_trains: int) -> InlineKeyboardMarkup:
+    """번호 버튼만 한 줄에 5개씩. 열차 상세는 본문에 별도 표시."""
     rows = []
-    for i, t in enumerate(trains[:10]):
-        rows.append([InlineKeyboardButton(f"{i+1}. {t}", callback_data=f"pick:{i}")])
+    indices = list(range(min(n_trains, 10)))
+    for chunk_start in range(0, len(indices), 5):
+        chunk = indices[chunk_start:chunk_start + 5]
+        rows.append([
+            InlineKeyboardButton(str(i + 1), callback_data=f"pick:{i}")
+            for i in chunk
+        ])
     rows.append([
         InlineKeyboardButton("전부", callback_data="pick:all"),
         InlineKeyboardButton("취소", callback_data="pick:none"),
@@ -246,9 +252,13 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "trains": trains, "search_params": search_params,
         "seat_option": _seat_option_from_intent(rail_type, intent["seat_pref"]),
     }
+    visible = trains[:10]
+    lines = ["어떤 열차로 예약할까요?", ""]
+    for i, t in enumerate(visible):
+        lines.append(f"{i + 1}. {t}")
     await update.message.reply_text(
-        "어떤 열차로 폴링할까요?",
-        reply_markup=_train_keyboard(trains),
+        "\n".join(lines),
+        reply_markup=_train_keyboard(len(visible)),
     )
 
 
@@ -305,7 +315,7 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if _SESSION.is_polling(tid):
-        await cq.edit_message_text("이미 진행 중인 폴링이 있어요. /cancel 후 다시.")
+        await cq.edit_message_text("이미 진행 중인 예약 시도가 있어요. /cancel 후 다시.")
         return
 
     cancel_event = threading.Event()
@@ -324,7 +334,7 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         permanent = any(kw in msg for kw in ["로그인", "login", "Login", "인증", "Auth", "expired", "401", "403"])
         if permanent:
             asyncio.run_coroutine_threadsafe(
-                notifier.send_text(bot, tid, f"폴링 중단: {msg}\n/setup 다시 해주세요."),
+                notifier.send_text(bot, tid, f"예약 시도 중단: {msg}\n/setup 다시 해주세요."),
                 loop,
             )
             return False
@@ -340,7 +350,7 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     task = asyncio.create_task(runner())
     _SESSION.start_poll(tid, task, cancel_event)
     context.user_data.pop("search", None)
-    await cq.edit_message_text("폴링 시작. 좌석 잡히면 알림 드립니다.")
+    await cq.edit_message_text("예약 시도 시작. 좌석 잡히면 알림 드립니다.")
 
 
 from ..service import payment as svc_pay
@@ -401,7 +411,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     actions = []
 
     if _SESSION.cancel_poll(tid):
-        actions.append("폴링 중단됨")
+        actions.append("예약 시도 중단됨")
 
     pending = _SESSION.get_pending(tid)
     if pending:
