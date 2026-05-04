@@ -360,3 +360,29 @@ async def on_payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE
         await cq.edit_message_text("결제 완료. 승차권은 SRT/코레일 앱에서 확인해주세요.")
     else:
         await cq.edit_message_text("결제 실패 (카드 정보 확인 필요).")
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ensure_allowed(update):
+        await _block_unallowed(update)
+        return
+
+    tid = update.effective_user.id
+    actions = []
+
+    if _SESSION.cancel_poll(tid):
+        actions.append("폴링 중단됨")
+
+    pending = _SESSION.get_pending(tid)
+    if pending:
+        try:
+            await asyncio.to_thread(pending["rail"].cancel, pending["reservation"])
+            actions.append("대기 중 예약 취소됨")
+        except Exception as e:
+            actions.append(f"예약 취소 실패: {e}")
+        _SESSION.clear_pending(tid)
+
+    if not actions:
+        await update.message.reply_text("진행 중인 작업이 없어요.")
+    else:
+        await update.message.reply_text("\n".join(actions))

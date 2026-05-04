@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -234,3 +236,36 @@ async def test_pay_cancel_calls_rail_cancel(monkeypatch, tmp_user_dir, fernet_ke
 
     rail.cancel.assert_called_once_with(reservation)
     assert handlers._SESSION.get_pending(111) is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_active_polling(monkeypatch):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, session as session_mod
+
+    handlers._SESSION = session_mod.Session()
+
+    cancel_event = threading.Event()
+    async def dummy():
+        await asyncio.sleep(1)
+    task = asyncio.create_task(dummy())
+    handlers._SESSION.start_poll(111, task, cancel_event)
+
+    update = _make_update(111, "/cancel")
+    await handlers.cmd_cancel(update, MagicMock())
+
+    assert cancel_event.is_set()
+    update.message.reply_text.assert_called()
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_nothing_active(monkeypatch):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, session as session_mod
+    handlers._SESSION = session_mod.Session()
+
+    update = _make_update(111, "/cancel")
+    await handlers.cmd_cancel(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "없습니다" in text or "없어요" in text
