@@ -39,7 +39,7 @@ class Session:
         return True
 
     def set_pending(self, telegram_id: int, payload: dict) -> None:
-        """payload 키: {reservation, rail, intent, message_id}"""
+        """payload 키: {reservation, rail}"""
         self._pending[telegram_id] = payload
 
     def get_pending(self, telegram_id: int) -> dict | None:

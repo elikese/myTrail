@@ -269,3 +269,77 @@ async def test_cancel_with_nothing_active(monkeypatch):
     await handlers.cmd_cancel(update, MagicMock())
     text = update.message.reply_text.call_args.args[0]
     assert "없습니다" in text or "없어요" in text
+
+
+@pytest.mark.asyncio
+async def test_setup_srt_rejects_invalid_format(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers
+    context = MagicMock()
+    context.user_data = {"setup": {}}
+    upd = _make_update(111, "garbage_no_space")
+    state = await handlers.setup_srt(upd, context)
+    assert state == handlers.STATE_SRT
+    assert "형식" in upd.message.reply_text.call_args.args[0]
+    assert "srt" not in context.user_data["setup"]
+
+
+@pytest.mark.asyncio
+async def test_on_pick_permanent_error_terminates_polling(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, session as session_mod
+    handlers._SESSION = session_mod.Session()
+
+    captured = {}
+
+    def fake_poll(rail, params, indices, seat_option, on_success, on_error, cancel_event):
+        # 영구 오류 테스트: on_error에 인증 관련 예외 전달
+        result = on_error(Exception("Login failed"))
+        captured["on_error_result"] = result
+
+    monkeypatch.setattr("srtgo.service.reservation.poll_and_reserve", fake_poll)
+
+    rail = MagicMock()
+    train = MagicMock()
+    context = MagicMock()
+    context.user_data = {
+        "search": {
+            "rail": rail, "rail_type": "SRT",
+            "trains": [train],
+            "search_params": {"dep": "x", "arr": "y", "date": "20260505",
+                              "time": "180000", "passengers": []},
+            "seat_option": object(),
+        }
+    }
+    context.application.bot = MagicMock()
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pick:0"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_pick(update, context)
+    # poll_and_reserve를 비동기로 to_thread에서 실행하기에 잠시 대기
+    import asyncio as _aio
+    await _aio.sleep(0.1)
+    assert captured.get("on_error_result") is False
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_warns_when_credentials_exist(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"claude_key": "old", "srt": None, "ktx": None,
+                       "card": {"number": "n", "password": "p",
+                                "birthday": "b", "expire": "e"}})
+    context = MagicMock()
+    context.user_data = {}
+    upd = _make_update(111, "/setup")
+    state = await handlers.setup_entry(upd, context)
+    assert state == handlers.STATE_CLAUDE_KEY
+    assert upd.message.reply_text.call_count == 2
+    first_text = upd.message.reply_text.call_args_list[0].args[0]
+    assert "이미" in first_text or "덮어" in first_text

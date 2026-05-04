@@ -64,6 +64,12 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if not _ensure_allowed(update):
         await _block_unallowed(update)
         return ConversationHandler.END
+    tid = update.effective_user.id
+    if storage.exists(tid):
+        await update.message.reply_text(
+            "이미 등록된 자격증명이 있어요. 덮어쓰려면 다시 /setup, "
+            "취소하려면 그냥 무시하세요. 계속 진행합니다 — 마지막 단계에서 저장됩니다."
+        )
     context.user_data["setup"] = {}
     await update.message.reply_text(
         "자격증명 등록을 시작합니다.\n"
@@ -81,19 +87,22 @@ async def setup_claude_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return STATE_SRT
 
 
-def _parse_id_pw(text: str) -> dict | None:
+_INVALID = object()
+
+
+def _parse_id_pw(text: str):
     text = text.strip()
     if text.lower() == "skip":
         return None
     parts = text.split()
     if len(parts) != 2:
-        return None
+        return _INVALID
     return {"id": parts[0], "pw": parts[1]}
 
 
 async def setup_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cred = _parse_id_pw(update.message.text)
-    if cred is False:  # 형식 잘못
+    if cred is _INVALID:
         await update.message.reply_text("형식: 'id pw' 또는 'skip'")
         return STATE_SRT
     context.user_data["setup"]["srt"] = cred
@@ -104,7 +113,11 @@ async def setup_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def setup_ktx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["setup"]["ktx"] = _parse_id_pw(update.message.text)
+    cred = _parse_id_pw(update.message.text)
+    if cred is _INVALID:
+        await update.message.reply_text("형식: 'id pw' 또는 'skip'")
+        return STATE_KTX
+    context.user_data["setup"]["ktx"] = cred
     await update.message.reply_text(
         "4/4: 카드 정보를 한 줄에 공백 4개로:\n"
         "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
@@ -297,7 +310,14 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     def on_error(exc):
-        # 일시 오류로 간주, 계속 시도
+        msg = str(exc)
+        permanent = any(kw in msg for kw in ["로그인", "login", "Login", "인증", "Auth", "expired", "401", "403"])
+        if permanent:
+            asyncio.run_coroutine_threadsafe(
+                notifier.send_text(bot, tid, f"폴링 중단: {msg}\n/setup 다시 해주세요."),
+                loop,
+            )
+            return False
         return True
 
     async def runner():
