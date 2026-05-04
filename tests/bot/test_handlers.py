@@ -338,3 +338,57 @@ async def test_setup_entry_warns_when_credentials_exist(monkeypatch, tmp_user_di
     assert upd.message.reply_text.call_count == 2
     first_text = upd.message.reply_text.call_args_list[0].args[0]
     assert "이미" in first_text or "덮어" in first_text
+
+
+@pytest.mark.asyncio
+async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_dir, fernet_key):
+    """1차 메시지가 needs_clarification 받으면 2차 메시지를 합쳐서 재파싱한다."""
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {
+        "srt": {"id": "u", "pw": "p"}, "ktx": None,
+        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+    })
+
+    # 1차 응답: time 누락
+    intent_first = {
+        "rail": "SRT", "dep": "부산", "arr": "대전",
+        "date": "2026-05-04", "time": "000000",
+        "passengers": {"adult": 1, "child": 0, "senior": 0},
+        "seat_pref": "GENERAL_FIRST", "needs_clarification": ["time"],
+    }
+    # 2차 응답: 합쳐진 텍스트로 완전한 intent
+    intent_second = {
+        "rail": "SRT", "dep": "부산", "arr": "대전",
+        "date": "2026-05-04", "time": "200000",
+        "passengers": {"adult": 1, "child": 0, "senior": 0},
+        "seat_pref": "GENERAL_FIRST", "needs_clarification": [],
+    }
+
+    parsed_texts = []
+    def fake_parse(*, text, **_kw):
+        parsed_texts.append(text)
+        return intent_first if len(parsed_texts) == 1 else intent_second
+    monkeypatch.setattr("srtgo.bot.parser.parse", fake_parse)
+
+    rail = MagicMock()
+    rail.search_train.return_value = [MagicMock()]
+    monkeypatch.setattr("srtgo.service.auth.create_rail",
+                        lambda rail_type, credentials, debug=False: rail)
+
+    context = MagicMock()
+    context.user_data = {}
+
+    # 1차: 모호함 → pending 저장
+    upd1 = _make_update(111, "부산에서 대전")
+    await handlers.on_free_message(upd1, context)
+    assert context.user_data.get("pending_text") == "부산에서 대전"
+    assert "명확" in upd1.message.reply_text.call_args.args[0]
+
+    # 2차: 명확화 답변 → 이전 텍스트와 합쳐서 재파싱 → 성공
+    upd2 = _make_update(111, "오후 8시")
+    await handlers.on_free_message(upd2, context)
+    assert parsed_texts[1] == "부산에서 대전 / 오후 8시"
+    assert "pending_text" not in context.user_data   # 성공 후 자동 정리

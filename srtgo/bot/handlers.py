@@ -186,6 +186,12 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not api_key:
         await update.message.reply_text("운영자 설정 오류: BOT_CLAUDE_KEY 미설정.")
         return
+
+    # 직전 명확화 답변이면 이전 메시지와 합쳐서 재파싱
+    pending = context.user_data.pop("pending_text", None)
+    if pending:
+        text = f"{pending} / {text}"
+
     try:
         intent = parser.parse(text=text, today=today, api_key=api_key)
     except parser.ParseError as e:
@@ -193,6 +199,8 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if intent.get("needs_clarification"):
+        # 다음 메시지 때 합치도록 현 텍스트 보관 (일회성)
+        context.user_data["pending_text"] = text
         fields = ", ".join(intent["needs_clarification"])
         await update.message.reply_text(f"명확하게 알려주세요: {fields}")
         return
