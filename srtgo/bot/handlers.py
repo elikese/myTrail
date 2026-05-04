@@ -243,3 +243,71 @@ def _passengers_to_list(rail_type: str, p: dict) -> list:
         if p["child"]: out.append(ChildPassenger(p["child"]))
         if p["senior"]: out.append(SeniorPassenger(p["senior"]))
     return out
+
+
+import asyncio
+import threading
+
+from . import session as _session_mod
+from . import notifier
+from ..service import reservation as svc_resv
+
+
+_SESSION = _session_mod.Session()
+
+
+def _resolve_indices(data: str, n_trains: int) -> list[int] | None:
+    """callback data → 인덱스 목록 또는 None(취소)."""
+    if data == "pick:none":
+        return None
+    if data == "pick:all":
+        return list(range(min(n_trains, 10)))
+    return [int(data.removeprefix("pick:"))]
+
+
+async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+
+    search = context.user_data.get("search")
+    if not search:
+        await cq.edit_message_text("세션 만료. 다시 요청해주세요.")
+        return
+
+    indices = _resolve_indices(cq.data, len(search["trains"]))
+    if indices is None:
+        await cq.edit_message_text("취소됨.")
+        context.user_data.pop("search", None)
+        return
+
+    if _SESSION.is_polling(tid):
+        await cq.edit_message_text("이미 진행 중인 폴링이 있어요. /cancel 후 다시.")
+        return
+
+    cancel_event = threading.Event()
+    bot = context.application.bot
+    loop = asyncio.get_running_loop()
+
+    def on_success(reservation):
+        _SESSION.clear_pending(tid)
+        _SESSION.set_pending(tid, {"reservation": reservation, "rail": search["rail"]})
+        asyncio.run_coroutine_threadsafe(
+            notifier.send_seat_secured(bot, tid, reservation), loop
+        )
+
+    def on_error(exc):
+        # 일시 오류로 간주, 계속 시도
+        return True
+
+    async def runner():
+        await asyncio.to_thread(
+            svc_resv.poll_and_reserve,
+            search["rail"], search["search_params"], indices,
+            search["seat_option"], on_success, on_error, cancel_event,
+        )
+
+    task = asyncio.create_task(runner())
+    _SESSION.start_poll(tid, task, cancel_event)
+    context.user_data.pop("search", None)
+    await cq.edit_message_text("폴링 시작. 좌석 잡히면 알림 드립니다.")

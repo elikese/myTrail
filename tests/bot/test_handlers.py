@@ -131,3 +131,45 @@ async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key
     # 세션에 검색 결과 저장
     assert context.user_data["search"]["rail"] is rail
     assert len(context.user_data["search"]["trains"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, session as session_mod
+
+    handlers._SESSION = session_mod.Session()  # 테스트 격리
+
+    rail = MagicMock()
+    train = MagicMock()
+    context = MagicMock()
+    context.user_data = {
+        "search": {
+            "rail": rail, "rail_type": "SRT",
+            "trains": [train, train],
+            "search_params": {"dep": "x", "arr": "y", "date": "20260505",
+                              "time": "180000", "passengers": []},
+            "seat_option": object(),
+        }
+    }
+    context.application.bot = MagicMock()
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.effective_chat.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pick:0"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    # poll_and_reserve를 모킹해서 즉시 종료시킴
+    monkeypatch.setattr(
+        "srtgo.service.reservation.poll_and_reserve",
+        lambda *a, **kw: None,
+    )
+
+    await handlers.on_pick(update, context)
+
+    update.callback_query.edit_message_text.assert_called_once()
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    assert "폴링" in text
