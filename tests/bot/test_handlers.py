@@ -323,9 +323,11 @@ async def test_on_pick_permanent_error_terminates_polling(monkeypatch, tmp_user_
 
 
 @pytest.mark.asyncio
-async def test_setup_entry_warns_when_credentials_exist(monkeypatch, tmp_user_dir, fernet_key):
+async def test_setup_entry_first_call_warns_and_ends(monkeypatch, tmp_user_dir, fernet_key):
+    """기존 자격증명 있을 때 첫 /setup은 경고만 띄우고 대화 종료."""
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
+    from telegram.ext import ConversationHandler
     storage._reset_cipher_for_tests()
     storage.save(111, {"srt": None, "ktx": None,
                        "card": {"number": "n", "password": "p",
@@ -334,10 +336,48 @@ async def test_setup_entry_warns_when_credentials_exist(monkeypatch, tmp_user_di
     context.user_data = {}
     upd = _make_update(111, "/setup")
     state = await handlers.setup_entry(upd, context)
+
+    assert state == ConversationHandler.END
+    assert upd.message.reply_text.call_count == 1
+    text = upd.message.reply_text.call_args.args[0]
+    assert "이미" in text and "/setup" in text
+    assert context.user_data.get("setup_overwrite_armed") is True
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_second_call_proceeds(monkeypatch, tmp_user_dir, fernet_key):
+    """두 번째 /setup은 armed 플래그 보고 실제 진행."""
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None,
+                       "card": {"number": "n", "password": "p",
+                                "birthday": "b", "expire": "e"}})
+    context = MagicMock()
+    context.user_data = {"setup_overwrite_armed": True}
+    upd = _make_update(111, "/setup")
+    state = await handlers.setup_entry(upd, context)
+
     assert state == handlers.STATE_SRT
-    assert upd.message.reply_text.call_count == 2
-    first_text = upd.message.reply_text.call_args_list[0].args[0]
-    assert "이미" in first_text or "덮어" in first_text
+    assert "setup_overwrite_armed" not in context.user_data  # 소비됨
+    text = upd.message.reply_text.call_args.args[0]
+    assert "1/3" in text
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_no_existing_creds_proceeds_immediately(monkeypatch, tmp_user_dir, fernet_key):
+    """기존 자격증명 없으면 첫 /setup에 바로 진행."""
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    context = MagicMock()
+    context.user_data = {}
+    upd = _make_update(111, "/setup")
+    state = await handlers.setup_entry(upd, context)
+
+    assert state == handlers.STATE_SRT
+    text = upd.message.reply_text.call_args.args[0]
+    assert "1/3" in text
 
 
 @pytest.mark.asyncio

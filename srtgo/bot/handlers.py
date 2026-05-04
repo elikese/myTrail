@@ -65,12 +65,17 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if not _ensure_allowed(update):
         await _block_unallowed(update)
         return ConversationHandler.END
+
     tid = update.effective_user.id
-    if storage.exists(tid):
+    armed = context.user_data.pop("setup_overwrite_armed", False)
+    if storage.exists(tid) and not armed:
+        context.user_data["setup_overwrite_armed"] = True
         await update.message.reply_text(
-            "이미 등록된 자격증명이 있어요. 덮어쓰려면 다시 /setup, "
-            "취소하려면 그냥 무시하세요. 계속 진행합니다 — 마지막 단계에서 저장됩니다."
+            "이미 입력된 정보가 있습니다.\n"
+            "덮어쓰려면 /setup 한 번 더 보내주세요. 그대로 두려면 무시하세요."
         )
+        return ConversationHandler.END
+
     context.user_data["setup"] = {}
     await update.message.reply_text(
         "자격증명 등록을 시작합니다.\n"
