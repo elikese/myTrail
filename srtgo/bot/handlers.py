@@ -163,21 +163,51 @@ def _seat_option_from_intent(rail_type: str, pref: str):
         return getattr(ReserveOption, pref)   # ReserveOption은 일반 class (str 상수)
 
 
-def _train_keyboard(n_trains: int) -> InlineKeyboardMarkup:
-    """번호 버튼만 한 줄에 5개씩. 열차 상세는 본문에 별도 표시."""
+PAGE_SIZE = 10
+
+
+def _train_keyboard(n_trains: int, page: int = 0) -> InlineKeyboardMarkup:
+    """번호 버튼 + 이전/다음 페이지 + 전부/취소.
+
+    한 페이지에 PAGE_SIZE개 표시. n_trains > PAGE_SIZE면 페이지 네비 노출.
+    """
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, n_trains)
+    page_count = max(1, (n_trains + PAGE_SIZE - 1) // PAGE_SIZE)
+
     rows = []
-    indices = list(range(min(n_trains, 10)))
-    for chunk_start in range(0, len(indices), 5):
-        chunk = indices[chunk_start:chunk_start + 5]
+    indices_on_page = list(range(start, end))
+    for chunk_start in range(0, len(indices_on_page), 5):
+        chunk = indices_on_page[chunk_start:chunk_start + 5]
         rows.append([
             InlineKeyboardButton(str(i + 1), callback_data=f"pick:{i}")
             for i in chunk
         ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ 이전", callback_data=f"page:{page - 1}"))
+    if page < page_count - 1:
+        nav.append(InlineKeyboardButton("다음 ▶", callback_data=f"page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
     rows.append([
-        InlineKeyboardButton("전부", callback_data="pick:all"),
+        InlineKeyboardButton("이 페이지 전부", callback_data=f"pick:all:{page}"),
         InlineKeyboardButton("취소", callback_data="pick:none"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def _format_train_page(trains: list, page: int) -> str:
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, len(trains))
+    page_count = max(1, (len(trains) + PAGE_SIZE - 1) // PAGE_SIZE)
+    header = f"어떤 열차로 예약할까요? (페이지 {page + 1}/{page_count}, 총 {len(trains)}편)"
+    lines = [header, ""]
+    for i in range(start, end):
+        lines.append(f"{i + 1}. {trains[i]}")
+    return "\n".join(lines)
 
 
 async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,14 +281,11 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "rail": rail, "rail_type": rail_type,
         "trains": trains, "search_params": search_params,
         "seat_option": _seat_option_from_intent(rail_type, intent["seat_pref"]),
+        "page": 0,
     }
-    visible = trains[:10]
-    lines = ["어떤 열차로 예약할까요?", ""]
-    for i, t in enumerate(visible):
-        lines.append(f"{i + 1}. {t}")
     await update.message.reply_text(
-        "\n".join(lines),
-        reply_markup=_train_keyboard(len(visible)),
+        _format_train_page(trains, 0),
+        reply_markup=_train_keyboard(len(trains), 0),
     )
 
 
@@ -290,12 +317,39 @@ _SESSION = _session_mod.Session()
 
 
 def _resolve_indices(data: str, n_trains: int) -> list[int] | None:
-    """callback data → 인덱스 목록 또는 None(취소)."""
+    """callback data → 인덱스 목록 또는 None(취소).
+
+    pick:none      → None (취소)
+    pick:all:<P>   → P 페이지의 인덱스 전부
+    pick:<i>       → 단일 인덱스 [i]
+    """
     if data == "pick:none":
         return None
-    if data == "pick:all":
-        return list(range(min(n_trains, 10)))
+    if data.startswith("pick:all:"):
+        page = int(data.split(":")[2])
+        start = page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, n_trains)
+        return list(range(start, end))
     return [int(data.removeprefix("pick:"))]
+
+
+async def on_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """페이지 네비게이션 콜백 (◀ 이전 / 다음 ▶)."""
+    cq = update.callback_query
+    await cq.answer()
+
+    search = context.user_data.get("search")
+    if not search:
+        await cq.edit_message_text("세션 만료. 다시 요청해주세요.")
+        return
+
+    new_page = int(cq.data.removeprefix("page:"))
+    search["page"] = new_page
+    trains = search["trains"]
+    await cq.edit_message_text(
+        _format_train_page(trains, new_page),
+        reply_markup=_train_keyboard(len(trains), new_page),
+    )
 
 
 async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

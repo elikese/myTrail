@@ -381,6 +381,50 @@ async def test_setup_entry_no_existing_creds_proceeds_immediately(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_on_page_navigates_to_next_page(monkeypatch):
+    """다음 페이지 콜백이 메시지·키보드를 갱신한다."""
+    from srtgo.bot import handlers
+
+    trains = [MagicMock() for _ in range(15)]
+    for i, t in enumerate(trains):
+        t.__repr__ = lambda s, i=i: f"train{i}"
+
+    context = MagicMock()
+    context.user_data = {
+        "search": {"trains": trains, "page": 0, "rail": MagicMock(),
+                   "rail_type": "SRT", "search_params": {}, "seat_option": object()},
+    }
+
+    update = MagicMock()
+    update.callback_query = MagicMock()
+    update.callback_query.data = "page:1"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_page(update, context)
+
+    assert context.user_data["search"]["page"] == 1
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    assert "페이지 2/2" in text
+    assert "11. train10" in text   # 두 번째 페이지의 첫 항목
+    assert "15. train14" in text
+
+
+@pytest.mark.asyncio
+async def test_pick_all_resolves_to_current_page_indices():
+    """pick:all:P 가 P 페이지의 인덱스 전부를 반환한다."""
+    from srtgo.bot import handlers
+
+    # 15개 결과, 1페이지(인덱스 10–14) 선택
+    indices = handlers._resolve_indices("pick:all:1", 15)
+    assert indices == [10, 11, 12, 13, 14]
+
+    # 0페이지 (10개 가득)
+    indices = handlers._resolve_indices("pick:all:0", 15)
+    assert indices == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+
+@pytest.mark.asyncio
 async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_dir, fernet_key):
     """1차 메시지가 needs_clarification 받으면 2차 메시지를 합쳐서 재파싱한다."""
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")

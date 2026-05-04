@@ -74,6 +74,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", handlers.cmd_help))
     app.add_handler(CommandHandler("cancel", handlers.cmd_cancel))
     app.add_handler(_build_setup_conversation())
+    app.add_handler(CallbackQueryHandler(handlers.on_page, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(handlers.on_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(handlers.on_payment_decision, pattern=r"^pay:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_free_message))
