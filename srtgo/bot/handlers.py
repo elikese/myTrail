@@ -133,3 +133,113 @@ async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data.pop("setup", None)
     await update.message.reply_text("등록 취소됨.")
     return ConversationHandler.END
+
+
+import datetime as _dt
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from . import parser
+from ..service import auth as svc_auth
+
+
+def _seat_option_from_intent(rail_type: str, pref: str):
+    if rail_type == "SRT":
+        from ..rail.srt.models import SeatType
+        return SeatType[pref]   # SeatType은 Enum이라 subscript OK
+    else:
+        from ..rail.ktx.models import ReserveOption
+        return getattr(ReserveOption, pref)   # ReserveOption은 일반 class (str 상수)
+
+
+def _train_keyboard(trains: list) -> InlineKeyboardMarkup:
+    rows = []
+    for i, t in enumerate(trains[:10]):
+        rows.append([InlineKeyboardButton(f"{i+1}. {t}", callback_data=f"pick:{i}")])
+    rows.append([
+        InlineKeyboardButton("전부", callback_data="pick:all"),
+        InlineKeyboardButton("취소", callback_data="pick:none"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ensure_allowed(update):
+        await _block_unallowed(update)
+        return
+
+    tid = update.effective_user.id
+    creds = storage.load(tid)
+    if creds is None:
+        await update.message.reply_text("자격증명 미등록. /setup 부터 해주세요.")
+        return
+
+    text = update.message.text
+    today = _dt.date.today().isoformat()
+    try:
+        intent = parser.parse(text=text, today=today, api_key=creds["claude_key"])
+    except parser.ParseError as e:
+        await update.message.reply_text(f"이해 못 했어요. 다시 말해주세요.\n({e})")
+        return
+
+    if intent.get("needs_clarification"):
+        fields = ", ".join(intent["needs_clarification"])
+        await update.message.reply_text(f"명확하게 알려주세요: {fields}")
+        return
+
+    rail_type = intent["rail"]
+    cred = creds.get(rail_type.lower())
+    if not cred:
+        await update.message.reply_text(
+            f"{rail_type} 자격증명 미등록. /setup 다시 해주세요."
+        )
+        return
+
+    try:
+        rail = svc_auth.create_rail(rail_type, credentials=cred)
+    except Exception as e:
+        await update.message.reply_text(f"{rail_type} 로그인 실패: {e}")
+        return
+
+    date = intent["date"].replace("-", "")
+    search_params = {
+        "dep": intent["dep"], "arr": intent["arr"],
+        "date": date, "time": intent["time"],
+        "passengers": _passengers_to_list(rail_type, intent["passengers"]),
+        "include_no_seats": True,
+    }
+    try:
+        trains = rail.search_train(**search_params)
+    except Exception as e:
+        await update.message.reply_text(f"검색 실패: {e}")
+        return
+
+    if not trains:
+        await update.message.reply_text("해당 시간대 열차 없음.")
+        return
+
+    context.user_data["search"] = {
+        "rail": rail, "rail_type": rail_type,
+        "trains": trains, "search_params": search_params,
+        "seat_option": _seat_option_from_intent(rail_type, intent["seat_pref"]),
+    }
+    await update.message.reply_text(
+        "어떤 열차로 폴링할까요?",
+        reply_markup=_train_keyboard(trains),
+    )
+
+
+def _passengers_to_list(rail_type: str, p: dict) -> list:
+    """intent의 passengers dict → rail이 받는 Passenger 리스트."""
+    out = []
+    if rail_type == "SRT":
+        from ..rail.srt.models import Adult, Child, Senior
+        if p["adult"]: out.append(Adult(p["adult"]))
+        if p["child"]: out.append(Child(p["child"]))
+        if p["senior"]: out.append(Senior(p["senior"]))
+    else:
+        from ..rail.ktx.models import AdultPassenger, ChildPassenger, SeniorPassenger
+        if p["adult"]: out.append(AdultPassenger(p["adult"]))
+        if p["child"]: out.append(ChildPassenger(p["child"]))
+        if p["senior"]: out.append(SeniorPassenger(p["senior"]))
+    return out

@@ -90,3 +90,44 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
     assert saved["srt"] is None
     assert saved["ktx"] == {"id": "ktxid", "pw": "ktxpw"}
     assert saved["card"]["number"] == "1111222233334444"
+
+
+@pytest.mark.asyncio
+async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+
+    storage.save(111, {
+        "claude_key": "sk", "srt": {"id": "u", "pw": "p"},
+        "ktx": None,
+        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+    })
+
+    intent = {
+        "rail": "SRT", "dep": "부산", "arr": "서울",
+        "date": "2026-05-05", "time": "180000",
+        "passengers": {"adult": 1, "child": 0, "senior": 0},
+        "seat_pref": "GENERAL_FIRST", "needs_clarification": [],
+    }
+    monkeypatch.setattr("srtgo.bot.parser.parse",
+                        lambda **_kw: intent)
+
+    train1 = MagicMock(); train1.__repr__ = lambda s: "SRT 123 18:00"
+    train2 = MagicMock(); train2.__repr__ = lambda s: "SRT 125 18:30"
+    rail = MagicMock(); rail.search_train.return_value = [train1, train2]
+    monkeypatch.setattr("srtgo.service.auth.create_rail",
+                        lambda rail_type, credentials, debug=False: rail)
+
+    update = _make_update(111, "내일 오후 6시 부산 서울")
+    context = MagicMock()
+    context.user_data = {}
+    await handlers.on_free_message(update, context)
+
+    # 후보 메시지 + 인라인 키보드 호출됨
+    update.message.reply_text.assert_called()
+    kwargs = update.message.reply_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+    # 세션에 검색 결과 저장
+    assert context.user_data["search"]["rail"] is rail
+    assert len(context.user_data["search"]["trains"]) == 2
