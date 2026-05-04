@@ -1,6 +1,7 @@
 """텔레그램 봇 명령·메시지·콜백 핸들러."""
 
 import logging
+import os
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -57,7 +58,7 @@ from telegram.ext import ConversationHandler
 
 from . import storage
 
-STATE_CLAUDE_KEY, STATE_SRT, STATE_KTX, STATE_CARD = range(4)
+STATE_SRT, STATE_KTX, STATE_CARD = range(3)
 
 
 async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -73,16 +74,8 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["setup"] = {}
     await update.message.reply_text(
         "자격증명 등록을 시작합니다.\n"
-        "1/4: Anthropic Claude API 키를 보내주세요. (취소: /cancel)"
-    )
-    return STATE_CLAUDE_KEY
-
-
-async def setup_claude_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["setup"]["claude_key"] = update.message.text.strip()
-    await update.message.reply_text(
-        "2/4: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
-        "사용 안 하면 'skip'."
+        "1/3: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
+        "사용 안 하면 'skip'. (취소: /cancel)"
     )
     return STATE_SRT
 
@@ -107,7 +100,7 @@ async def setup_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_SRT
     context.user_data["setup"]["srt"] = cred
     await update.message.reply_text(
-        "3/4: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
+        "2/3: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
     )
     return STATE_KTX
 
@@ -119,7 +112,7 @@ async def setup_ktx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_KTX
     context.user_data["setup"]["ktx"] = cred
     await update.message.reply_text(
-        "4/4: 카드 정보를 한 줄에 공백 4개로:\n"
+        "3/3: 카드 정보를 한 줄에 공백 4개로:\n"
         "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
         "예: 1111222233334444 12 900101 1230"
     )
@@ -189,8 +182,12 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     text = update.message.text
     today = _dt.date.today().isoformat()
+    api_key = os.environ.get("BOT_CLAUDE_KEY")
+    if not api_key:
+        await update.message.reply_text("운영자 설정 오류: BOT_CLAUDE_KEY 미설정.")
+        return
     try:
-        intent = parser.parse(text=text, today=today, api_key=creds["claude_key"])
+        intent = parser.parse(text=text, today=today, api_key=api_key)
     except parser.ParseError as e:
         await update.message.reply_text(f"이해 못 했어요. 다시 말해주세요.\n({e})")
         return

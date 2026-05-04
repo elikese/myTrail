@@ -11,6 +11,7 @@
 ## 환경 변수
 - `BOT_TOKEN` — BotFather 토큰
 - `BOT_DB_KEY` — Fernet 키
+- `BOT_CLAUDE_KEY` — Anthropic API 키 (모든 봇 사용자 공통 — 운영자가 비용 부담)
 - `BOT_ALLOWED_IDS` — 콤마 구분 ID (예: `111111,222222`)
 - `BOT_USERS_DIR` — 자격증명 디렉토리 (기본: `data/users`)
 
@@ -22,6 +23,7 @@
 ```
 BOT_TOKEN=1234567890:AA...
 BOT_DB_KEY=wW2lFiec...
+BOT_CLAUDE_KEY=sk-ant-api03-...
 BOT_ALLOWED_IDS=111111,222222
 ```
 

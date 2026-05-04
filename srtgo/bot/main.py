@@ -27,9 +27,6 @@ def _build_setup_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CommandHandler("setup", handlers.setup_entry)],
         states={
-            handlers.STATE_CLAUDE_KEY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_claude_key),
-            ],
             handlers.STATE_SRT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_srt),
             ],
@@ -64,6 +61,9 @@ def main() -> None:
         sys.exit(1)
     if not os.environ.get("BOT_DB_KEY"):
         print("BOT_DB_KEY 환경변수 미설정 (Fernet 키)", file=sys.stderr)
+        sys.exit(1)
+    if not os.environ.get("BOT_CLAUDE_KEY"):
+        print("BOT_CLAUDE_KEY 환경변수 미설정 (Anthropic API 키)", file=sys.stderr)
         sys.exit(1)
     if not os.environ.get("BOT_ALLOWED_IDS"):
         print("경고: BOT_ALLOWED_IDS 비어있음 — 모든 사용자 차단됨", file=sys.stderr)

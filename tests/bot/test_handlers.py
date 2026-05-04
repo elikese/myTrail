@@ -61,14 +61,9 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
     context = MagicMock()
     context.user_data = {}
 
-    # /setup 시작
+    # /setup 시작 → 첫 단계 SRT
     upd = _make_update(111, "/setup")
     state = await handlers.setup_entry(upd, context)
-    assert state == handlers.STATE_CLAUDE_KEY
-
-    # Claude key
-    upd = _make_update(111, "sk-claude")
-    state = await handlers.setup_claude_key(upd, context)
     assert state == handlers.STATE_SRT
 
     # SRT (skip)
@@ -88,7 +83,7 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
     assert state == ConversationHandler.END
 
     saved = storage.load(111)
-    assert saved["claude_key"] == "sk-claude"
+    assert "claude_key" not in saved
     assert saved["srt"] is None
     assert saved["ktx"] == {"id": "ktxid", "pw": "ktxpw"}
     assert saved["card"]["number"] == "1111222233334444"
@@ -100,8 +95,9 @@ async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
 
+    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
     storage.save(111, {
-        "claude_key": "sk", "srt": {"id": "u", "pw": "p"},
+        "srt": {"id": "u", "pw": "p"},
         "ktx": None,
         "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
     })
@@ -185,7 +181,6 @@ async def test_pay_confirm_charges_card(monkeypatch, tmp_user_dir, fernet_key):
     handlers._SESSION = session_mod.Session()
 
     storage.save(111, {
-        "claude_key": "sk",
         "srt": None, "ktx": None,
         "card": {"number": "n", "password": "p", "birthday": "b", "expire": "e"},
     })
@@ -217,7 +212,7 @@ async def test_pay_cancel_calls_rail_cancel(monkeypatch, tmp_user_dir, fernet_ke
     from srtgo.bot import handlers, storage, session as session_mod
     storage._reset_cipher_for_tests()
     handlers._SESSION = session_mod.Session()
-    storage.save(111, {"claude_key": "sk", "srt": None, "ktx": None,
+    storage.save(111, {"srt": None, "ktx": None,
                        "card": {"number": "n", "password": "p",
                                 "birthday": "b", "expire": "e"}})
 
@@ -332,14 +327,14 @@ async def test_setup_entry_warns_when_credentials_exist(monkeypatch, tmp_user_di
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
-    storage.save(111, {"claude_key": "old", "srt": None, "ktx": None,
+    storage.save(111, {"srt": None, "ktx": None,
                        "card": {"number": "n", "password": "p",
                                 "birthday": "b", "expire": "e"}})
     context = MagicMock()
     context.user_data = {}
     upd = _make_update(111, "/setup")
     state = await handlers.setup_entry(upd, context)
-    assert state == handlers.STATE_CLAUDE_KEY
+    assert state == handlers.STATE_SRT
     assert upd.message.reply_text.call_count == 2
     first_text = upd.message.reply_text.call_args_list[0].args[0]
     assert "이미" in first_text or "덮어" in first_text
