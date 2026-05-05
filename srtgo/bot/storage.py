@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -63,7 +64,46 @@ def load(telegram_id: int) -> dict | None:
         plaintext = _get_cipher().decrypt(token)
     except InvalidToken as e:
         raise StorageDecryptError(str(e)) from e
-    return json.loads(plaintext.decode())
+    data = json.loads(plaintext.decode())
+
+    if _migrate_in_place(data):
+        try:
+            save(telegram_id, data)
+        except Exception as e:
+            logger.warning("마이그레이션 디스크 저장 실패 tid=%d: %s", telegram_id, e)
+
+    return data
+
+
+def _migrate_in_place(data: dict) -> bool:
+    """legacy `card` 키를 `cards` 리스트로 변환. 변경되었으면 True."""
+    has_legacy = "card" in data
+    has_new = "cards" in data and data["cards"] is not None
+
+    if has_legacy and has_new:
+        logger.warning("legacy card와 cards 동시 존재 — card 무시")
+        del data["card"]
+        return True
+
+    if has_legacy and not has_new:
+        legacy = data.pop("card")
+        if legacy:
+            new_card = {"id": _fresh_card_id(set()), "label": None, **legacy}
+            data["cards"] = [new_card]
+        else:
+            data["cards"] = []
+        return True
+
+    return False
+
+
+def _fresh_card_id(existing_ids: set[str]) -> str:
+    """4 hex id 생성 — 충돌 시 재추첨 (최대 10회). 실패 시 RuntimeError."""
+    for _ in range(10):
+        candidate = secrets.token_hex(2)
+        if candidate not in existing_ids:
+            return candidate
+    raise RuntimeError("카드 ID 생성 충돌 한도 초과")
 
 
 def delete(telegram_id: int) -> None:
@@ -82,3 +122,40 @@ def list_user_ids() -> list[int]:
             except ValueError:
                 continue
     return out
+
+
+def list_cards(telegram_id: int) -> list[dict]:
+    data = load(telegram_id)
+    if data is None:
+        return []
+    return list(data.get("cards", []))
+
+
+def get_card(telegram_id: int, card_id: str) -> dict | None:
+    for card in list_cards(telegram_id):
+        if card["id"] == card_id:
+            return card
+    return None
+
+
+def add_card(telegram_id: int, fields: dict, label: str | None) -> str:
+    data = load(telegram_id) or {"srt": None, "ktx": None, "cards": []}
+    data.setdefault("cards", [])
+    existing_ids = {c["id"] for c in data["cards"]}
+    new_id = _fresh_card_id(existing_ids)
+    data["cards"].append({"id": new_id, "label": label, **fields})
+    save(telegram_id, data)
+    return new_id
+
+
+def remove_card(telegram_id: int, card_id: str) -> bool:
+    data = load(telegram_id)
+    if data is None:
+        return False
+    cards = data.get("cards", [])
+    new_cards = [c for c in cards if c["id"] != card_id]
+    if len(new_cards) == len(cards):
+        return False
+    data["cards"] = new_cards
+    save(telegram_id, data)
+    return True
