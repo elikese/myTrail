@@ -60,6 +60,7 @@ from telegram.ext import ConversationHandler
 from . import storage
 
 STATE_SRT, STATE_KTX, STATE_CARD, STATE_CARD_LABEL = range(4)
+STATE_CARDS_NEW_FIELDS, STATE_CARDS_NEW_LABEL = range(10, 12)
 
 
 async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -156,9 +157,9 @@ async def setup_card_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.pop("setup", None)
         return ConversationHandler.END
 
-    new_id = storage._fresh_card_id(set())
-    setup_data["cards"] = [{"id": new_id, "label": label, **pending}]
+    setup_data["cards"] = []  # 자격증명 먼저 저장, 카드는 add_card로
     storage.save(update.effective_user.id, setup_data)
+    storage.add_card(update.effective_user.id, pending, label)
 
     context.user_data.pop("setup", None)
     await update.message.reply_text("등록 완료. 이제 자유롭게 말해보세요.")
@@ -656,3 +657,62 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("진행 중인 작업이 없어요.")
     else:
         await update.message.reply_text("\n".join(actions))
+
+
+async def cards_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """cards:add 콜백 진입점."""
+    cq = update.callback_query
+    await cq.answer()
+
+    context.user_data.pop("cards_new", None)
+    context.user_data["cards_new"] = {}
+
+    await cq.edit_message_text(
+        "추가할 카드 정보를 한 줄에 공백 4개로:\n"
+        "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
+        "예: 1111222233334444 12 900101 1230\n"
+        "(취소: /cancel)"
+    )
+    return STATE_CARDS_NEW_FIELDS
+
+
+async def cards_add_fields(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    parts = update.message.text.strip().split()
+    if len(parts) != 4:
+        await update.message.reply_text("형식이 잘못됐어요. 4개 항목을 공백으로.")
+        return STATE_CARDS_NEW_FIELDS
+    number, password, birthday, expire = parts
+    context.user_data["cards_new"] = {
+        "number": number, "password": password,
+        "birthday": birthday, "expire": expire,
+    }
+    await update.message.reply_text("카드 별칭? (예: '신한', 없으면 'skip')")
+    return STATE_CARDS_NEW_LABEL
+
+
+async def cards_add_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    label: str | None
+    if text.lower() == "skip" or text == "":
+        label = None
+    else:
+        label = text[:32]
+
+    fields = context.user_data.pop("cards_new", None)
+    if not fields:
+        await update.message.reply_text("등록 상태 손상. /cards 다시 해주세요.")
+        return ConversationHandler.END
+
+    storage.add_card(update.effective_user.id, fields, label)
+    cards = storage.list_cards(update.effective_user.id)
+    await update.message.reply_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+    return ConversationHandler.END
+
+
+async def cards_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("cards_new", None)
+    await update.message.reply_text("카드 추가 취소됨.")
+    return ConversationHandler.END

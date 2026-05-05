@@ -813,3 +813,96 @@ async def test_on_cards_noop_returns_to_list(monkeypatch, tmp_user_dir, fernet_k
     assert len(storage.list_cards(111)) == 1
     kwargs = update.callback_query.edit_message_text.call_args.kwargs
     assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_cards_add_entry_starts_conversation(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:add"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {}
+
+    state = await handlers.cards_add_entry(update, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_cards_add_full_flow(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    from telegram.ext import ConversationHandler
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    context = MagicMock()
+    context.user_data = {}
+
+    # 진입 (콜백)
+    cb_update = MagicMock()
+    cb_update.effective_user.id = 111
+    cb_update.callback_query = MagicMock()
+    cb_update.callback_query.data = "cards:add"
+    cb_update.callback_query.answer = AsyncMock()
+    cb_update.callback_query.edit_message_text = AsyncMock()
+    state = await handlers.cards_add_entry(cb_update, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+
+    # 카드 4필드 입력
+    upd1 = _make_update(111, "1111222233334444 12 900101 1230")
+    state = await handlers.cards_add_fields(upd1, context)
+    assert state == handlers.STATE_CARDS_NEW_LABEL
+
+    # 별칭 입력
+    upd2 = _make_update(111, "회사")
+    state = await handlers.cards_add_label(upd2, context)
+    assert state == ConversationHandler.END
+
+    cards = storage.list_cards(111)
+    assert len(cards) == 1
+    assert cards[0]["label"] == "회사"
+    assert cards[0]["number"] == "1111222233334444"
+
+
+@pytest.mark.asyncio
+async def test_cards_add_fields_rejects_bad_format(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers
+    context = MagicMock()
+    context.user_data = {"cards_new": {}}
+    upd = _make_update(111, "garbage")
+    state = await handlers.cards_add_fields(upd, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+    assert "형식" in upd.message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cards_add_label_skip_saves_none(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    context = MagicMock()
+    context.user_data = {"cards_new": {
+        "number": "1111", "password": "12",
+        "birthday": "900101", "expire": "1230",
+    }}
+
+    upd = _make_update(111, "skip")
+    await handlers.cards_add_label(upd, context)
+
+    cards = storage.list_cards(111)
+    assert cards[0]["label"] is None
+    assert "cards_new" not in context.user_data
