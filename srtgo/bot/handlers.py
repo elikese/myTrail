@@ -190,6 +190,22 @@ def _seat_option_from_intent(rail_type: str, pref: str):
 PAGE_SIZE = 10
 
 
+def _card_display(card: dict) -> str:
+    last4 = card["number"][-4:]
+    if card.get("label"):
+        return f"{card['label']} (*{last4})"
+    return f"*{last4}"
+
+
+def _card_select_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(_card_display(c), callback_data=f"pay:card:{c['id']}")]
+        for c in cards
+    ]
+    rows.append([InlineKeyboardButton("← 돌아가기", callback_data="pay:back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _train_keyboard(n_trains: int, page: int = 0) -> InlineKeyboardMarkup:
     """번호 버튼 + 이전/다음 페이지 + 전부/취소.
 
@@ -439,30 +455,81 @@ async def on_payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE
     await cq.answer()
     tid = update.effective_user.id
 
+    if cq.data == "pay:cancel":
+        await _handle_pay_cancel(cq, tid)
+        return
+    if cq.data == "pay:back":
+        await _handle_pay_back(cq, tid)
+        return
+    if cq.data == "pay:confirm":
+        await _handle_pay_confirm(cq, tid)
+        return
+    if cq.data.startswith("pay:card:"):
+        card_id = cq.data.removeprefix("pay:card:")
+        await _handle_pay_card(cq, tid, card_id)
+        return
+
+
+async def _handle_pay_cancel(cq, tid: int) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
+        return
+    try:
+        await asyncio.to_thread(pending["rail"].cancel, pending["reservation"])
+    except Exception as e:
+        logger.error("예약 취소 실패: %s", e)
+    _SESSION.clear_pending(tid)
+    await cq.edit_message_text("예약 취소됨.")
+
+
+async def _handle_pay_confirm(cq, tid: int) -> None:
     pending = _SESSION.get_pending(tid)
     if not pending:
         await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
         return
 
+    cards = storage.list_cards(tid)
+    if not cards:
+        await cq.edit_message_text(
+            "등록된 카드가 없어요. /cards 에서 추가 후 다시 결제 눌러주세요.",
+            reply_markup=notifier.confirm_keyboard(),
+        )
+        return
+
+    await cq.edit_message_text(
+        "어느 카드로 결제할까요?",
+        reply_markup=_card_select_keyboard(cards),
+    )
+
+
+async def _handle_pay_back(cq, tid: int) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요.")
+        return
+    await cq.edit_message_text(
+        notifier.format_seat_secured_message(pending["reservation"]),
+        reply_markup=notifier.confirm_keyboard(),
+    )
+
+
+async def _handle_pay_card(cq, tid: int, card_id: str) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
+        return
+
+    card = storage.get_card(tid, card_id)
+    if card is None:
+        await cq.edit_message_text(
+            "이 카드는 삭제됐어요. 다시 결제 눌러 카드를 골라주세요.",
+            reply_markup=notifier.confirm_keyboard(),
+        )
+        return
+
     rail = pending["rail"]
     reservation = pending["reservation"]
-
-    if cq.data == "pay:cancel":
-        try:
-            await asyncio.to_thread(rail.cancel, reservation)
-        except Exception as e:
-            logger.error("예약 취소 실패: %s", e)
-        _SESSION.clear_pending(tid)
-        await cq.edit_message_text("예약 취소됨.")
-        return
-
-    # pay:confirm
-    creds = storage.load(tid)
-    card = creds.get("card") if creds else None
-    if not card:
-        await cq.edit_message_text("카드 정보 없음. /setup 다시.")
-        return
-
     try:
         ok = await asyncio.to_thread(
             svc_pay.pay_with_saved_card, rail, reservation, card
