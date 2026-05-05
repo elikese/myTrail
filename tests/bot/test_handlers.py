@@ -906,3 +906,27 @@ async def test_cards_add_label_skip_saves_none(monkeypatch, tmp_user_dir, fernet
     cards = storage.list_cards(111)
     assert cards[0]["label"] is None
     assert "cards_new" not in context.user_data
+
+
+def test_cancel_registration_after_conversations():
+    """Regression: cmd_cancel must be registered after both ConversationHandlers.
+
+    Previously CommandHandler('cancel', ...) was registered before the setup and
+    cards_add ConversationHandlers, so /cancel during a conversation hit the
+    global cmd_cancel first and never cleared the conversation's state map.
+    """
+    import inspect
+    from srtgo.bot import main as botmain
+
+    source = inspect.getsource(botmain.main)
+    cancel_pos = source.find('CommandHandler("cancel"')
+    setup_conv_pos = source.find("_build_setup_conversation()")
+    cards_conv_pos = source.find("_build_cards_add_conversation()")
+
+    assert cancel_pos > 0, "cmd_cancel registration not found"
+    assert setup_conv_pos > 0, "_build_setup_conversation registration not found"
+    assert cards_conv_pos > 0, "_build_cards_add_conversation registration not found"
+    assert cancel_pos > setup_conv_pos, \
+        "CommandHandler('cancel', ...) must be registered AFTER _build_setup_conversation()"
+    assert cancel_pos > cards_conv_pos, \
+        "CommandHandler('cancel', ...) must be registered AFTER _build_cards_add_conversation()"
