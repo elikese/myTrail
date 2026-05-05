@@ -178,3 +178,6 @@ auth.json
 .env.*
 !.env.example
 data/
+
+# Git worktrees (superpowers workflow)
+.worktrees/
