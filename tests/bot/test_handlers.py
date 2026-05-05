@@ -48,7 +48,7 @@ async def test_help_lists_commands(monkeypatch):
     update = _make_update(111)
     await handlers.cmd_help(update, MagicMock())
     text = update.message.reply_text.call_args.args[0]
-    for cmd in ["/setup", "/cancel", "/help"]:
+    for cmd in ["/setup", "/cards", "/cancel", "/help"]:
         assert cmd in text
 
 
@@ -57,36 +57,41 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
 
     context = MagicMock()
     context.user_data = {}
 
-    # /setup 시작 → 첫 단계 SRT
     upd = _make_update(111, "/setup")
     state = await handlers.setup_entry(upd, context)
     assert state == handlers.STATE_SRT
 
-    # SRT (skip)
     upd = _make_update(111, "skip")
     state = await handlers.setup_srt(upd, context)
     assert state == handlers.STATE_KTX
 
-    # KTX
     upd = _make_update(111, "ktxid ktxpw")
     state = await handlers.setup_ktx(upd, context)
     assert state == handlers.STATE_CARD
 
-    # 카드
     upd = _make_update(111, "1111222233334444 12 900101 1230")
     state = await handlers.setup_card(upd, context)
+    assert state == handlers.STATE_CARD_LABEL
+
+    # 별칭 입력 (skip)
+    upd = _make_update(111, "skip")
+    state = await handlers.setup_card_label(upd, context)
     from telegram.ext import ConversationHandler
     assert state == ConversationHandler.END
 
     saved = storage.load(111)
-    assert "claude_key" not in saved
     assert saved["srt"] is None
     assert saved["ktx"] == {"id": "ktxid", "pw": "ktxpw"}
-    assert saved["card"]["number"] == "1111222233334444"
+    assert saved["cards"] == [{
+        "id": "ab12", "label": None,
+        "number": "1111222233334444", "password": "12",
+        "birthday": "900101", "expire": "1230",
+    }]
 
 
 @pytest.mark.asyncio
@@ -99,7 +104,10 @@ async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key
     storage.save(111, {
         "srt": {"id": "u", "pw": "p"},
         "ktx": None,
-        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+        "cards": [
+            {"id": "ab12", "label": None, "number": "1", "password": "2",
+             "birthday": "3", "expire": "4"}
+        ],
     })
 
     intent = {
@@ -174,19 +182,15 @@ async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_ke
 
 
 @pytest.mark.asyncio
-async def test_pay_confirm_charges_card(monkeypatch, tmp_user_dir, fernet_key):
+async def test_pay_confirm_with_no_cards_keeps_pending(monkeypatch, tmp_user_dir, fernet_key):
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage, session as session_mod
     storage._reset_cipher_for_tests()
     handlers._SESSION = session_mod.Session()
 
-    storage.save(111, {
-        "srt": None, "ktx": None,
-        "card": {"number": "n", "password": "p", "birthday": "b", "expire": "e"},
-    })
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
 
     rail = MagicMock()
-    rail.pay_with_card.return_value = True
     reservation = MagicMock()
     handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
 
@@ -199,11 +203,130 @@ async def test_pay_confirm_charges_card(monkeypatch, tmp_user_dir, fernet_key):
 
     await handlers.on_payment_decision(update, MagicMock())
 
-    rail.pay_with_card.assert_called_once_with(reservation,
-        {"number": "n", "password": "p", "birthday": "b", "expire": "e"})
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    assert "카드" in text and "/cards" in text
+    # pending 보존
+    assert handlers._SESSION.get_pending(111) is not None
+
+
+@pytest.mark.asyncio
+async def test_pay_confirm_with_cards_shows_select_keyboard(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage, session as session_mod
+    storage._reset_cipher_for_tests()
+    handlers._SESSION = session_mod.Session()
+
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+        {"id": "cd34", "label": None, "number": "5555666677778888",
+         "password": "34", "birthday": "900202", "expire": "0631"},
+    ]})
+
+    rail = MagicMock()
+    reservation = MagicMock()
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:confirm"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+    # pending 보존
+    assert handlers._SESSION.get_pending(111) is not None
+
+
+@pytest.mark.asyncio
+async def test_pay_card_executes_payment(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage, session as session_mod
+    storage._reset_cipher_for_tests()
+    handlers._SESSION = session_mod.Session()
+
+    card = {"id": "ab12", "label": "신한", "number": "1111222233334444",
+            "password": "12", "birthday": "900101", "expire": "1230"}
+    storage.save(111, {"srt": None, "ktx": None, "cards": [card]})
+
+    rail = MagicMock()
+    reservation = MagicMock()
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    monkeypatch.setattr(
+        "srtgo.service.payment.pay_with_saved_card",
+        lambda r, res, c: True,
+    )
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:card:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
     text = update.callback_query.edit_message_text.call_args.args[0]
     assert "결제 완료" in text
     assert handlers._SESSION.get_pending(111) is None
+
+
+@pytest.mark.asyncio
+async def test_pay_card_handles_deleted_card(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage, session as session_mod
+    storage._reset_cipher_for_tests()
+    handlers._SESSION = session_mod.Session()
+
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})  # 카드 사라진 상태
+
+    rail = MagicMock()
+    reservation = MagicMock()
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:card:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    assert "삭제" in text
+    # pending 보존
+    assert handlers._SESSION.get_pending(111) is not None
+
+
+@pytest.mark.asyncio
+async def test_pay_back_returns_to_seat_keyboard(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, session as session_mod
+    handlers._SESSION = session_mod.Session()
+
+    rail = MagicMock()
+    reservation = MagicMock()
+    reservation.__str__ = lambda s: "RESV"
+    handlers._SESSION.set_pending(111, {"reservation": reservation, "rail": rail})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "pay:back"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_payment_decision(update, MagicMock())
+
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+    assert handlers._SESSION.get_pending(111) is not None
 
 
 @pytest.mark.asyncio
@@ -212,9 +335,7 @@ async def test_pay_cancel_calls_rail_cancel(monkeypatch, tmp_user_dir, fernet_ke
     from srtgo.bot import handlers, storage, session as session_mod
     storage._reset_cipher_for_tests()
     handlers._SESSION = session_mod.Session()
-    storage.save(111, {"srt": None, "ktx": None,
-                       "card": {"number": "n", "password": "p",
-                                "birthday": "b", "expire": "e"}})
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
 
     rail = MagicMock()
     reservation = MagicMock()
@@ -329,9 +450,10 @@ async def test_setup_entry_first_call_warns_and_ends(monkeypatch, tmp_user_dir, 
     from srtgo.bot import handlers, storage
     from telegram.ext import ConversationHandler
     storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": None, "ktx": None,
-                       "card": {"number": "n", "password": "p",
-                                "birthday": "b", "expire": "e"}})
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "n", "password": "p",
+         "birthday": "b", "expire": "e"}
+    ]})
     context = MagicMock()
     context.user_data = {}
     upd = _make_update(111, "/setup")
@@ -350,9 +472,10 @@ async def test_setup_entry_second_call_proceeds(monkeypatch, tmp_user_dir, ferne
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": None, "ktx": None,
-                       "card": {"number": "n", "password": "p",
-                                "birthday": "b", "expire": "e"}})
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "n", "password": "p",
+         "birthday": "b", "expire": "e"}
+    ]})
     context = MagicMock()
     context.user_data = {"setup_overwrite_armed": True}
     upd = _make_update(111, "/setup")
@@ -361,7 +484,7 @@ async def test_setup_entry_second_call_proceeds(monkeypatch, tmp_user_dir, ferne
     assert state == handlers.STATE_SRT
     assert "setup_overwrite_armed" not in context.user_data  # 소비됨
     text = upd.message.reply_text.call_args.args[0]
-    assert "1/3" in text
+    assert "1/4" in text
 
 
 @pytest.mark.asyncio
@@ -377,7 +500,7 @@ async def test_setup_entry_no_existing_creds_proceeds_immediately(monkeypatch, t
 
     assert state == handlers.STATE_SRT
     text = upd.message.reply_text.call_args.args[0]
-    assert "1/3" in text
+    assert "1/4" in text
 
 
 @pytest.mark.asyncio
@@ -433,7 +556,10 @@ async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_d
     storage._reset_cipher_for_tests()
     storage.save(111, {
         "srt": {"id": "u", "pw": "p"}, "ktx": None,
-        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+        "cards": [
+            {"id": "ab12", "label": None, "number": "1", "password": "2",
+             "birthday": "3", "expire": "4"}
+        ],
     })
 
     # 1차 응답: time 누락
@@ -476,3 +602,331 @@ async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_d
     await handlers.on_free_message(upd2, context)
     assert parsed_texts[1] == "부산에서 대전 / 오후 8시"
     assert "pending_text" not in context.user_data   # 성공 후 자동 정리
+
+
+@pytest.mark.asyncio
+async def test_setup_card_label_with_alias_saves_label(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    from telegram.ext import ConversationHandler
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+
+    context = MagicMock()
+    context.user_data = {"setup": {
+        "srt": None, "ktx": None,
+        "_pending_card": {"number": "1111", "password": "12",
+                          "birthday": "900101", "expire": "1230"},
+    }}
+
+    upd = _make_update(111, "신한")
+    state = await handlers.setup_card_label(upd, context)
+    assert state == ConversationHandler.END
+
+    saved = storage.load(111)
+    assert saved["cards"][0]["label"] == "신한"
+    assert saved["cards"][0]["number"] == "1111"
+
+
+@pytest.mark.asyncio
+async def test_setup_card_label_truncates_to_32_chars(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+
+    context = MagicMock()
+    context.user_data = {"setup": {
+        "srt": None, "ktx": None,
+        "_pending_card": {"number": "n", "password": "p",
+                          "birthday": "b", "expire": "e"},
+    }}
+
+    long = "x" * 50
+    upd = _make_update(111, long)
+    await handlers.setup_card_label(upd, context)
+
+    saved = storage.load(111)
+    assert saved["cards"][0]["label"] == "x" * 32
+
+
+def test_card_display_with_label():
+    from srtgo.bot import handlers
+    card = {"id": "ab12", "label": "신한", "number": "1111222233334444",
+            "password": "x", "birthday": "x", "expire": "x"}
+    assert handlers._card_display(card) == "신한 (*4444)"
+
+
+def test_card_display_without_label():
+    from srtgo.bot import handlers
+    card = {"id": "ab12", "label": None, "number": "1111222233334444",
+            "password": "x", "birthday": "x", "expire": "x"}
+    assert handlers._card_display(card) == "*4444"
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_blocks_unallowed(monkeypatch):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers
+    update = _make_update(999)
+    await handlers.cmd_cards(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "허용" in text
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_requires_setup(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "/setup" in text
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_lists_existing_cards(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+        {"id": "cd34", "label": None, "number": "5555666677778888",
+         "password": "34", "birthday": "900202", "expire": "0631"},
+    ]})
+
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+
+    kwargs = update.message.reply_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+    text = update.message.reply_text.call_args.args[0]
+    # 화면에 표시된 라벨이 양쪽 카드 모두 포함
+    btn_texts = " ".join(
+        b.text for row in kwargs["reply_markup"].inline_keyboard for b in row
+    )
+    combined = text + " " + btn_texts
+    assert "신한" in combined
+    assert "*4444" in combined
+    assert "*8888" in combined
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_with_zero_cards_shows_only_add(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+
+    kwargs = update.message.reply_text.call_args.kwargs
+    keyboard = kwargs["reply_markup"].inline_keyboard
+    # 마지막 행에 ➕ 카드 추가 버튼
+    last_row = keyboard[-1]
+    assert any("추가" in btn.text for btn in last_row)
+
+
+@pytest.mark.asyncio
+async def test_on_cards_del_shows_confirmation(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:del:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "삭제" in text
+    # 카드는 아직 그대로 (확인 단계만)
+    assert len(storage.list_cards(111)) == 1
+    assert "reply_markup" in kwargs
+    buttons = [
+        b.callback_data
+        for row in kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert "cards:del_confirm:ab12" in buttons
+    assert "cards:noop" in buttons
+
+
+@pytest.mark.asyncio
+async def test_on_cards_del_confirm_removes_card(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:del_confirm:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    assert storage.list_cards(111) == []
+    # 화면이 목록으로 갱신됨 (카드 0장 → 추가 버튼만)
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_on_cards_noop_returns_to_list(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:noop"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    # 카드 그대로 + 화면이 목록으로 복귀
+    assert len(storage.list_cards(111)) == 1
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_cards_add_entry_starts_conversation(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:add"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {}
+
+    state = await handlers.cards_add_entry(update, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_cards_add_full_flow(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    from telegram.ext import ConversationHandler
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    context = MagicMock()
+    context.user_data = {}
+
+    # 진입 (콜백)
+    cb_update = MagicMock()
+    cb_update.effective_user.id = 111
+    cb_update.callback_query = MagicMock()
+    cb_update.callback_query.data = "cards:add"
+    cb_update.callback_query.answer = AsyncMock()
+    cb_update.callback_query.edit_message_text = AsyncMock()
+    state = await handlers.cards_add_entry(cb_update, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+
+    # 카드 4필드 입력
+    upd1 = _make_update(111, "1111222233334444 12 900101 1230")
+    state = await handlers.cards_add_fields(upd1, context)
+    assert state == handlers.STATE_CARDS_NEW_LABEL
+
+    # 별칭 입력
+    upd2 = _make_update(111, "회사")
+    state = await handlers.cards_add_label(upd2, context)
+    assert state == ConversationHandler.END
+
+    cards = storage.list_cards(111)
+    assert len(cards) == 1
+    assert cards[0]["label"] == "회사"
+    assert cards[0]["number"] == "1111222233334444"
+
+
+@pytest.mark.asyncio
+async def test_cards_add_fields_rejects_bad_format(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers
+    context = MagicMock()
+    context.user_data = {"cards_new": {}}
+    upd = _make_update(111, "garbage")
+    state = await handlers.cards_add_fields(upd, context)
+    assert state == handlers.STATE_CARDS_NEW_FIELDS
+    assert "형식" in upd.message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cards_add_label_skip_saves_none(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    context = MagicMock()
+    context.user_data = {"cards_new": {
+        "number": "1111", "password": "12",
+        "birthday": "900101", "expire": "1230",
+    }}
+
+    upd = _make_update(111, "skip")
+    await handlers.cards_add_label(upd, context)
+
+    cards = storage.list_cards(111)
+    assert cards[0]["label"] is None
+    assert "cards_new" not in context.user_data
+
+
+def test_cancel_registration_after_conversations():
+    """Regression: cmd_cancel must be registered after both ConversationHandlers.
+
+    Previously CommandHandler('cancel', ...) was registered before the setup and
+    cards_add ConversationHandlers, so /cancel during a conversation hit the
+    global cmd_cancel first and never cleared the conversation's state map.
+    """
+    import inspect
+    from srtgo.bot import main as botmain
+
+    source = inspect.getsource(botmain.main)
+    cancel_pos = source.find('CommandHandler("cancel"')
+    setup_conv_pos = source.find("_build_setup_conversation()")
+    cards_conv_pos = source.find("_build_cards_add_conversation()")
+
+    assert cancel_pos > 0, "cmd_cancel registration not found"
+    assert setup_conv_pos > 0, "_build_setup_conversation registration not found"
+    assert cards_conv_pos > 0, "_build_cards_add_conversation registration not found"
+    assert cancel_pos > setup_conv_pos, \
+        "CommandHandler('cancel', ...) must be registered AFTER _build_setup_conversation()"
+    assert cancel_pos > cards_conv_pos, \
+        "CommandHandler('cancel', ...) must be registered AFTER _build_cards_add_conversation()"

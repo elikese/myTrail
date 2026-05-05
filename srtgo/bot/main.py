@@ -36,8 +36,29 @@ def _build_setup_conversation() -> ConversationHandler:
             handlers.STATE_CARD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_card),
             ],
+            handlers.STATE_CARD_LABEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_card_label),
+            ],
         },
         fallbacks=[CommandHandler("cancel", handlers.setup_cancel)],
+    )
+
+
+def _build_cards_add_conversation() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(handlers.cards_add_entry, pattern=r"^cards:add$"),
+        ],
+        states={
+            handlers.STATE_CARDS_NEW_FIELDS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.cards_add_fields),
+            ],
+            handlers.STATE_CARDS_NEW_LABEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.cards_add_label),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", handlers.cards_add_cancel)],
+        per_message=False,
     )
 
 
@@ -72,11 +93,17 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", handlers.cmd_start))
     app.add_handler(CommandHandler("help", handlers.cmd_help))
-    app.add_handler(CommandHandler("cancel", handlers.cmd_cancel))
+    app.add_handler(CommandHandler("cards", handlers.cmd_cards))
     app.add_handler(_build_setup_conversation())
+    app.add_handler(_build_cards_add_conversation())
+    app.add_handler(CommandHandler("cancel", handlers.cmd_cancel))
     app.add_handler(CallbackQueryHandler(handlers.on_page, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(handlers.on_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(handlers.on_payment_decision, pattern=r"^pay:"))
+    app.add_handler(CallbackQueryHandler(
+        handlers.on_cards_callback,
+        pattern=r"^cards:(del|del_confirm)(?=:)|^cards:noop$",
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_free_message))
 
     logger.info("봇 polling 시작")

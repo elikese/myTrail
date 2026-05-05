@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = (
     "사용법:\n"
     "/setup — 자격증명 등록 (Claude API 키, 철도사 ID/PW, 카드)\n"
+    "/cards — 카드 목록·추가·삭제\n"
     "/cancel — 진행 중 예약 시도·예약 취소\n"
     "/help — 도움말\n\n"
     "그 외에는 자유롭게 말하세요. 예: '내일 오후 6시 부산에서 서울 KTX'"
@@ -58,7 +59,8 @@ from telegram.ext import ConversationHandler
 
 from . import storage
 
-STATE_SRT, STATE_KTX, STATE_CARD = range(3)
+STATE_SRT, STATE_KTX, STATE_CARD, STATE_CARD_LABEL = range(4)
+STATE_CARDS_NEW_FIELDS, STATE_CARDS_NEW_LABEL = range(10, 12)
 
 
 async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -79,7 +81,7 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["setup"] = {}
     await update.message.reply_text(
         "자격증명 등록을 시작합니다.\n"
-        "1/3: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
+        "1/4: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
         "사용 안 하면 'skip'. (취소: /cancel)"
     )
     return STATE_SRT
@@ -105,7 +107,7 @@ async def setup_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_SRT
     context.user_data["setup"]["srt"] = cred
     await update.message.reply_text(
-        "2/3: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
+        "2/4: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
     )
     return STATE_KTX
 
@@ -117,7 +119,7 @@ async def setup_ktx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_KTX
     context.user_data["setup"]["ktx"] = cred
     await update.message.reply_text(
-        "3/3: 카드 정보를 한 줄에 공백 4개로:\n"
+        "3/4: 카드 정보를 한 줄에 공백 4개로:\n"
         "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
         "예: 1111222233334444 12 900101 1230"
     )
@@ -130,11 +132,35 @@ async def setup_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("형식이 잘못됐어요. 4개 항목을 공백으로.")
         return STATE_CARD
     number, password, birthday, expire = parts
-    context.user_data["setup"]["card"] = {
+    context.user_data["setup"]["_pending_card"] = {
         "number": number, "password": password,
         "birthday": birthday, "expire": expire,
     }
-    storage.save(update.effective_user.id, context.user_data["setup"])
+    await update.message.reply_text(
+        "4/4: 카드 별칭? (예: '신한', 없으면 'skip')"
+    )
+    return STATE_CARD_LABEL
+
+
+async def setup_card_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    label: str | None
+    if text.lower() == "skip" or text == "":
+        label = None
+    else:
+        label = text[:32]
+
+    setup_data = context.user_data.get("setup", {})
+    pending = setup_data.pop("_pending_card", None)
+    if pending is None:
+        await update.message.reply_text("등록 상태 손상. /setup 다시 해주세요.")
+        context.user_data.pop("setup", None)
+        return ConversationHandler.END
+
+    setup_data["cards"] = []  # 자격증명 먼저 저장, 카드는 add_card로
+    storage.save(update.effective_user.id, setup_data)
+    storage.add_card(update.effective_user.id, pending, label)
+
     context.user_data.pop("setup", None)
     await update.message.reply_text("등록 완료. 이제 자유롭게 말해보세요.")
     return ConversationHandler.END
@@ -164,6 +190,22 @@ def _seat_option_from_intent(rail_type: str, pref: str):
 
 
 PAGE_SIZE = 10
+
+
+def _card_display(card: dict) -> str:
+    last4 = card["number"][-4:]
+    if card.get("label"):
+        return f"{card['label']} (*{last4})"
+    return f"*{last4}"
+
+
+def _card_select_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(_card_display(c), callback_data=f"pay:card:{c['id']}")]
+        for c in cards
+    ]
+    rows.append([InlineKeyboardButton("← 돌아가기", callback_data="pay:back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _train_keyboard(n_trains: int, page: int = 0) -> InlineKeyboardMarkup:
@@ -415,30 +457,81 @@ async def on_payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE
     await cq.answer()
     tid = update.effective_user.id
 
+    if cq.data == "pay:cancel":
+        await _handle_pay_cancel(cq, tid)
+        return
+    if cq.data == "pay:back":
+        await _handle_pay_back(cq, tid)
+        return
+    if cq.data == "pay:confirm":
+        await _handle_pay_confirm(cq, tid)
+        return
+    if cq.data.startswith("pay:card:"):
+        card_id = cq.data.removeprefix("pay:card:")
+        await _handle_pay_card(cq, tid, card_id)
+        return
+
+
+async def _handle_pay_cancel(cq, tid: int) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
+        return
+    try:
+        await asyncio.to_thread(pending["rail"].cancel, pending["reservation"])
+    except Exception as e:
+        logger.error("예약 취소 실패: %s", e)
+    _SESSION.clear_pending(tid)
+    await cq.edit_message_text("예약 취소됨.")
+
+
+async def _handle_pay_confirm(cq, tid: int) -> None:
     pending = _SESSION.get_pending(tid)
     if not pending:
         await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
         return
 
+    cards = storage.list_cards(tid)
+    if not cards:
+        await cq.edit_message_text(
+            "등록된 카드가 없어요. /cards 에서 추가 후 다시 결제 눌러주세요.",
+            reply_markup=notifier.confirm_keyboard(),
+        )
+        return
+
+    await cq.edit_message_text(
+        "어느 카드로 결제할까요?",
+        reply_markup=_card_select_keyboard(cards),
+    )
+
+
+async def _handle_pay_back(cq, tid: int) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요.")
+        return
+    await cq.edit_message_text(
+        notifier.format_seat_secured_message(pending["reservation"]),
+        reply_markup=notifier.confirm_keyboard(),
+    )
+
+
+async def _handle_pay_card(cq, tid: int, card_id: str) -> None:
+    pending = _SESSION.get_pending(tid)
+    if not pending:
+        await cq.edit_message_text("대기 중인 예약이 없어요. 결제 마감이 지났을 수 있습니다.")
+        return
+
+    card = storage.get_card(tid, card_id)
+    if card is None:
+        await cq.edit_message_text(
+            "이 카드는 삭제됐어요. 다시 결제 눌러 카드를 골라주세요.",
+            reply_markup=notifier.confirm_keyboard(),
+        )
+        return
+
     rail = pending["rail"]
     reservation = pending["reservation"]
-
-    if cq.data == "pay:cancel":
-        try:
-            await asyncio.to_thread(rail.cancel, reservation)
-        except Exception as e:
-            logger.error("예약 취소 실패: %s", e)
-        _SESSION.clear_pending(tid)
-        await cq.edit_message_text("예약 취소됨.")
-        return
-
-    # pay:confirm
-    creds = storage.load(tid)
-    card = creds.get("card") if creds else None
-    if not card:
-        await cq.edit_message_text("카드 정보 없음. /setup 다시.")
-        return
-
     try:
         ok = await asyncio.to_thread(
             svc_pay.pay_with_saved_card, rail, reservation, card
@@ -454,6 +547,90 @@ async def on_payment_decision(update: Update, context: ContextTypes.DEFAULT_TYPE
         await cq.edit_message_text("결제 완료. 승차권은 SRT/코레일 앱에서 확인해주세요.")
     else:
         await cq.edit_message_text("결제 실패 (카드 정보 확인 필요).")
+
+
+def _cards_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🗑 {_card_display(c)}",
+                              callback_data=f"cards:del:{c['id']}")]
+        for c in cards
+    ]
+    rows.append([InlineKeyboardButton("➕ 카드 추가", callback_data="cards:add")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _cards_list_text(cards: list[dict]) -> str:
+    if not cards:
+        return "등록된 카드가 없어요. ➕ 카드 추가 버튼을 눌러주세요."
+    lines = ["등록된 카드:"]
+    for c in cards:
+        lines.append(f"- {_card_display(c)}")
+    return "\n".join(lines)
+
+
+def _del_confirm_keyboard(card_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("예, 삭제",
+                             callback_data=f"cards:del_confirm:{card_id}"),
+        InlineKeyboardButton("아니오", callback_data="cards:noop"),
+    ]])
+
+
+async def cmd_cards(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ensure_allowed(update):
+        await _block_unallowed(update)
+        return
+
+    tid = update.effective_user.id
+    if not storage.exists(tid):
+        await update.message.reply_text("/setup 부터 해주세요.")
+        return
+
+    cards = storage.list_cards(tid)
+    await update.message.reply_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+
+
+async def _redraw_cards_list(cq, tid: int) -> None:
+    cards = storage.list_cards(tid)
+    await cq.edit_message_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+
+
+async def on_cards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """cards:del:<id>, cards:del_confirm:<id>, cards:noop 처리.
+
+    cards:add 는 별도 ConversationHandler 진입점으로 등록됨.
+    """
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+
+    if cq.data.startswith("cards:del_confirm:"):
+        card_id = cq.data.removeprefix("cards:del_confirm:")
+        storage.remove_card(tid, card_id)
+        await _redraw_cards_list(cq, tid)
+        return
+
+    if cq.data.startswith("cards:del:"):
+        card_id = cq.data.removeprefix("cards:del:")
+        card = storage.get_card(tid, card_id)
+        if card is None:
+            await _redraw_cards_list(cq, tid)
+            return
+        await cq.edit_message_text(
+            f"정말 삭제할까요?\n  {_card_display(card)}",
+            reply_markup=_del_confirm_keyboard(card_id),
+        )
+        return
+
+    if cq.data == "cards:noop":
+        await _redraw_cards_list(cq, tid)
+        return
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -480,3 +657,62 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("진행 중인 작업이 없어요.")
     else:
         await update.message.reply_text("\n".join(actions))
+
+
+async def cards_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """cards:add 콜백 진입점."""
+    cq = update.callback_query
+    await cq.answer()
+
+    context.user_data.pop("cards_new", None)
+    context.user_data["cards_new"] = {}
+
+    await cq.edit_message_text(
+        "추가할 카드 정보를 한 줄에 공백 4개로:\n"
+        "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
+        "예: 1111222233334444 12 900101 1230\n"
+        "(취소: /cancel)"
+    )
+    return STATE_CARDS_NEW_FIELDS
+
+
+async def cards_add_fields(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    parts = update.message.text.strip().split()
+    if len(parts) != 4:
+        await update.message.reply_text("형식이 잘못됐어요. 4개 항목을 공백으로.")
+        return STATE_CARDS_NEW_FIELDS
+    number, password, birthday, expire = parts
+    context.user_data["cards_new"] = {
+        "number": number, "password": password,
+        "birthday": birthday, "expire": expire,
+    }
+    await update.message.reply_text("카드 별칭? (예: '신한', 없으면 'skip')")
+    return STATE_CARDS_NEW_LABEL
+
+
+async def cards_add_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    label: str | None
+    if text.lower() == "skip" or text == "":
+        label = None
+    else:
+        label = text[:32]
+
+    fields = context.user_data.pop("cards_new", None)
+    if not fields:
+        await update.message.reply_text("등록 상태 손상. /cards 다시 해주세요.")
+        return ConversationHandler.END
+
+    storage.add_card(update.effective_user.id, fields, label)
+    cards = storage.list_cards(update.effective_user.id)
+    await update.message.reply_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+    return ConversationHandler.END
+
+
+async def cards_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("cards_new", None)
+    await update.message.reply_text("카드 추가 취소됨.")
+    return ConversationHandler.END
