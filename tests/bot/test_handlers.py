@@ -705,7 +705,13 @@ async def test_cmd_cards_lists_existing_cards(monkeypatch, tmp_user_dir, fernet_
     assert "reply_markup" in kwargs
     text = update.message.reply_text.call_args.args[0]
     # 화면에 표시된 라벨이 양쪽 카드 모두 포함
-    assert "신한" in text or kwargs["reply_markup"].inline_keyboard  # 키보드에라도 표시
+    btn_texts = " ".join(
+        b.text for row in kwargs["reply_markup"].inline_keyboard for b in row
+    )
+    combined = text + " " + btn_texts
+    assert "신한" in combined
+    assert "*4444" in combined
+    assert "*8888" in combined
 
 
 @pytest.mark.asyncio
@@ -749,6 +755,14 @@ async def test_on_cards_del_shows_confirmation(monkeypatch, tmp_user_dir, fernet
     assert "삭제" in text
     # 카드는 아직 그대로 (확인 단계만)
     assert len(storage.list_cards(111)) == 1
+    assert "reply_markup" in kwargs
+    buttons = [
+        b.callback_data
+        for row in kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert "cards:del_confirm:ab12" in buttons
+    assert "cards:noop" in buttons
 
 
 @pytest.mark.asyncio

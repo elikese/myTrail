@@ -76,14 +76,14 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handlers.cmd_start))
     app.add_handler(CommandHandler("help", handlers.cmd_help))
     app.add_handler(CommandHandler("cancel", handlers.cmd_cancel))
+    app.add_handler(CommandHandler("cards", handlers.cmd_cards))
     app.add_handler(_build_setup_conversation())
     app.add_handler(CallbackQueryHandler(handlers.on_page, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(handlers.on_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(handlers.on_payment_decision, pattern=r"^pay:"))
-    app.add_handler(CommandHandler("cards", handlers.cmd_cards))
     app.add_handler(CallbackQueryHandler(
         handlers.on_cards_callback,
-        pattern=r"^cards:(del|del_confirm|noop)",
+        pattern=r"^cards:(del|del_confirm)(?=:)|^cards:noop$",
     ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_free_message))
 

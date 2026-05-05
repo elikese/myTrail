@@ -592,6 +592,14 @@ async def cmd_cards(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _redraw_cards_list(cq, tid: int) -> None:
+    cards = storage.list_cards(tid)
+    await cq.edit_message_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+
+
 async def on_cards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """cards:del:<id>, cards:del_confirm:<id>, cards:noop 처리.
 
@@ -604,22 +612,14 @@ async def on_cards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if cq.data.startswith("cards:del_confirm:"):
         card_id = cq.data.removeprefix("cards:del_confirm:")
         storage.remove_card(tid, card_id)
-        cards = storage.list_cards(tid)
-        await cq.edit_message_text(
-            _cards_list_text(cards),
-            reply_markup=_cards_keyboard(cards),
-        )
+        await _redraw_cards_list(cq, tid)
         return
 
     if cq.data.startswith("cards:del:"):
         card_id = cq.data.removeprefix("cards:del:")
         card = storage.get_card(tid, card_id)
         if card is None:
-            cards = storage.list_cards(tid)
-            await cq.edit_message_text(
-                _cards_list_text(cards),
-                reply_markup=_cards_keyboard(cards),
-            )
+            await _redraw_cards_list(cq, tid)
             return
         await cq.edit_message_text(
             f"정말 삭제할까요?\n  {_card_display(card)}",
@@ -628,11 +628,7 @@ async def on_cards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if cq.data == "cards:noop":
-        cards = storage.list_cards(tid)
-        await cq.edit_message_text(
-            _cards_list_text(cards),
-            reply_markup=_cards_keyboard(cards),
-        )
+        await _redraw_cards_list(cq, tid)
         return
 
 
