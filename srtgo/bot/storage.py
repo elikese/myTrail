@@ -139,8 +139,8 @@ def get_card(telegram_id: int, card_id: str) -> dict | None:
 
 
 def add_card(telegram_id: int, fields: dict, label: str | None) -> str:
+    # Seed default record if user has no file yet — must stay in sync with /setup writer
     data = load(telegram_id) or {"srt": None, "ktx": None, "cards": []}
-    data.setdefault("cards", [])
     existing_ids = {c["id"] for c in data["cards"]}
     new_id = _fresh_card_id(existing_ids)
     data["cards"].append({"id": new_id, "label": label, **fields})

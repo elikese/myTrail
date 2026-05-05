@@ -127,6 +127,10 @@ def test_load_prefers_cards_when_both_present(tmp_user_dir, fernet_key, caplog):
 
     assert "card" not in loaded
     assert loaded["cards"][0]["number"] == "kept_num"
+    assert any(
+        r.levelno == logging.WARNING and "card" in r.message
+        for r in caplog.records
+    )
 
 
 def test_add_card_appends_with_id(tmp_user_dir, fernet_key, monkeypatch):
