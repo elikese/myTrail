@@ -198,3 +198,34 @@ def test_get_card_returns_card_or_none(tmp_user_dir, fernet_key):
 def test_list_cards_on_user_without_file_returns_empty(tmp_user_dir, fernet_key):
     from srtgo.bot import storage
     assert storage.list_cards(999) == []
+
+
+def test_legacy_user_first_load_writes_new_format_to_disk(tmp_user_dir, fernet_key, monkeypatch):
+    """디스크에 legacy 파일이 있던 사용자가 첫 load 후 디스크가 새 포맷으로 갱신된다."""
+    from srtgo.bot import storage
+
+    # 다른 테스트에서 캐시된 cipher가 남아있을 수 있으므로 현재 env 키로 재생성
+    storage._reset_cipher_for_tests()
+
+    legacy = {
+        "srt": {"id": "u", "pw": "p"},
+        "ktx": None,
+        "card": {"number": "1111222233334444", "password": "12",
+                 "birthday": "900101", "expire": "1230"},
+    }
+    storage.save(42, legacy)
+
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+    storage.load(42)  # 첫 load — 마이그레이션 발동
+
+    # 디스크 파일을 raw로 다시 디크립트해 검증 (load 호출 없이)
+    from cryptography.fernet import Fernet
+    import json, os
+    cipher = Fernet(os.environ["BOT_DB_KEY"].encode())
+    raw = (tmp_user_dir / "42.json.enc").read_bytes()
+    on_disk = json.loads(cipher.decrypt(raw).decode())
+
+    assert "card" not in on_disk
+    assert on_disk["cards"][0]["id"] == "ab12"
+    assert on_disk["cards"][0]["label"] is None
+    assert on_disk["cards"][0]["number"] == "1111222233334444"
