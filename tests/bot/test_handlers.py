@@ -57,36 +57,41 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
 
     context = MagicMock()
     context.user_data = {}
 
-    # /setup 시작 → 첫 단계 SRT
     upd = _make_update(111, "/setup")
     state = await handlers.setup_entry(upd, context)
     assert state == handlers.STATE_SRT
 
-    # SRT (skip)
     upd = _make_update(111, "skip")
     state = await handlers.setup_srt(upd, context)
     assert state == handlers.STATE_KTX
 
-    # KTX
     upd = _make_update(111, "ktxid ktxpw")
     state = await handlers.setup_ktx(upd, context)
     assert state == handlers.STATE_CARD
 
-    # 카드
     upd = _make_update(111, "1111222233334444 12 900101 1230")
     state = await handlers.setup_card(upd, context)
+    assert state == handlers.STATE_CARD_LABEL
+
+    # 별칭 입력 (skip)
+    upd = _make_update(111, "skip")
+    state = await handlers.setup_card_label(upd, context)
     from telegram.ext import ConversationHandler
     assert state == ConversationHandler.END
 
     saved = storage.load(111)
-    assert "claude_key" not in saved
     assert saved["srt"] is None
     assert saved["ktx"] == {"id": "ktxid", "pw": "ktxpw"}
-    assert saved["card"]["number"] == "1111222233334444"
+    assert saved["cards"] == [{
+        "id": "ab12", "label": None,
+        "number": "1111222233334444", "password": "12",
+        "birthday": "900101", "expire": "1230",
+    }]
 
 
 @pytest.mark.asyncio
@@ -99,7 +104,10 @@ async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key
     storage.save(111, {
         "srt": {"id": "u", "pw": "p"},
         "ktx": None,
-        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+        "cards": [
+            {"id": "ab12", "label": None, "number": "1", "password": "2",
+             "birthday": "3", "expire": "4"}
+        ],
     })
 
     intent = {
@@ -329,9 +337,10 @@ async def test_setup_entry_first_call_warns_and_ends(monkeypatch, tmp_user_dir, 
     from srtgo.bot import handlers, storage
     from telegram.ext import ConversationHandler
     storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": None, "ktx": None,
-                       "card": {"number": "n", "password": "p",
-                                "birthday": "b", "expire": "e"}})
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "n", "password": "p",
+         "birthday": "b", "expire": "e"}
+    ]})
     context = MagicMock()
     context.user_data = {}
     upd = _make_update(111, "/setup")
@@ -350,9 +359,10 @@ async def test_setup_entry_second_call_proceeds(monkeypatch, tmp_user_dir, ferne
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": None, "ktx": None,
-                       "card": {"number": "n", "password": "p",
-                                "birthday": "b", "expire": "e"}})
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "n", "password": "p",
+         "birthday": "b", "expire": "e"}
+    ]})
     context = MagicMock()
     context.user_data = {"setup_overwrite_armed": True}
     upd = _make_update(111, "/setup")
@@ -361,7 +371,7 @@ async def test_setup_entry_second_call_proceeds(monkeypatch, tmp_user_dir, ferne
     assert state == handlers.STATE_SRT
     assert "setup_overwrite_armed" not in context.user_data  # 소비됨
     text = upd.message.reply_text.call_args.args[0]
-    assert "1/3" in text
+    assert "1/4" in text
 
 
 @pytest.mark.asyncio
@@ -377,7 +387,7 @@ async def test_setup_entry_no_existing_creds_proceeds_immediately(monkeypatch, t
 
     assert state == handlers.STATE_SRT
     text = upd.message.reply_text.call_args.args[0]
-    assert "1/3" in text
+    assert "1/4" in text
 
 
 @pytest.mark.asyncio
@@ -433,7 +443,10 @@ async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_d
     storage._reset_cipher_for_tests()
     storage.save(111, {
         "srt": {"id": "u", "pw": "p"}, "ktx": None,
-        "card": {"number": "1", "password": "2", "birthday": "3", "expire": "4"},
+        "cards": [
+            {"id": "ab12", "label": None, "number": "1", "password": "2",
+             "birthday": "3", "expire": "4"}
+        ],
     })
 
     # 1차 응답: time 누락
@@ -476,3 +489,49 @@ async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_d
     await handlers.on_free_message(upd2, context)
     assert parsed_texts[1] == "부산에서 대전 / 오후 8시"
     assert "pending_text" not in context.user_data   # 성공 후 자동 정리
+
+
+@pytest.mark.asyncio
+async def test_setup_card_label_with_alias_saves_label(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    from telegram.ext import ConversationHandler
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+
+    context = MagicMock()
+    context.user_data = {"setup": {
+        "srt": None, "ktx": None,
+        "_pending_card": {"number": "1111", "password": "12",
+                          "birthday": "900101", "expire": "1230"},
+    }}
+
+    upd = _make_update(111, "신한")
+    state = await handlers.setup_card_label(upd, context)
+    assert state == ConversationHandler.END
+
+    saved = storage.load(111)
+    assert saved["cards"][0]["label"] == "신한"
+    assert saved["cards"][0]["number"] == "1111"
+
+
+@pytest.mark.asyncio
+async def test_setup_card_label_truncates_to_32_chars(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    monkeypatch.setattr(storage.secrets, "token_hex", lambda n: "ab12")
+
+    context = MagicMock()
+    context.user_data = {"setup": {
+        "srt": None, "ktx": None,
+        "_pending_card": {"number": "n", "password": "p",
+                          "birthday": "b", "expire": "e"},
+    }}
+
+    long = "x" * 50
+    upd = _make_update(111, long)
+    await handlers.setup_card_label(upd, context)
+
+    saved = storage.load(111)
+    assert saved["cards"][0]["label"] == "x" * 32

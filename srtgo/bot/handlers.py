@@ -58,7 +58,7 @@ from telegram.ext import ConversationHandler
 
 from . import storage
 
-STATE_SRT, STATE_KTX, STATE_CARD = range(3)
+STATE_SRT, STATE_KTX, STATE_CARD, STATE_CARD_LABEL = range(4)
 
 
 async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -79,7 +79,7 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["setup"] = {}
     await update.message.reply_text(
         "자격증명 등록을 시작합니다.\n"
-        "1/3: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
+        "1/4: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
         "사용 안 하면 'skip'. (취소: /cancel)"
     )
     return STATE_SRT
@@ -105,7 +105,7 @@ async def setup_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_SRT
     context.user_data["setup"]["srt"] = cred
     await update.message.reply_text(
-        "2/3: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
+        "2/4: KTX(코레일) 아이디·비번. 사용 안 하면 'skip'."
     )
     return STATE_KTX
 
@@ -117,7 +117,7 @@ async def setup_ktx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return STATE_KTX
     context.user_data["setup"]["ktx"] = cred
     await update.message.reply_text(
-        "3/3: 카드 정보를 한 줄에 공백 4개로:\n"
+        "3/4: 카드 정보를 한 줄에 공백 4개로:\n"
         "  카드번호 비번앞2자리 생년월일(YYMMDD) 만료(MMYY)\n"
         "예: 1111222233334444 12 900101 1230"
     )
@@ -130,11 +130,35 @@ async def setup_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("형식이 잘못됐어요. 4개 항목을 공백으로.")
         return STATE_CARD
     number, password, birthday, expire = parts
-    context.user_data["setup"]["card"] = {
+    context.user_data["setup"]["_pending_card"] = {
         "number": number, "password": password,
         "birthday": birthday, "expire": expire,
     }
-    storage.save(update.effective_user.id, context.user_data["setup"])
+    await update.message.reply_text(
+        "4/4: 카드 별칭? (예: '신한', 없으면 'skip')"
+    )
+    return STATE_CARD_LABEL
+
+
+async def setup_card_label(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    label: str | None
+    if text.lower() == "skip" or text == "":
+        label = None
+    else:
+        label = text[:32]
+
+    setup_data = context.user_data.get("setup", {})
+    pending = setup_data.pop("_pending_card", None)
+    if pending is None:
+        await update.message.reply_text("등록 상태 손상. /setup 다시 해주세요.")
+        context.user_data.pop("setup", None)
+        return ConversationHandler.END
+
+    new_id = storage._fresh_card_id(set())
+    setup_data["cards"] = [{"id": new_id, "label": label, **pending}]
+    storage.save(update.effective_user.id, setup_data)
+
     context.user_data.pop("setup", None)
     await update.message.reply_text("등록 완료. 이제 자유롭게 말해보세요.")
     return ConversationHandler.END

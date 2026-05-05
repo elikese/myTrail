@@ -36,6 +36,9 @@ def _build_setup_conversation() -> ConversationHandler:
             handlers.STATE_CARD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_card),
             ],
+            handlers.STATE_CARD_LABEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_card_label),
+            ],
         },
         fallbacks=[CommandHandler("cancel", handlers.setup_cancel)],
     )
