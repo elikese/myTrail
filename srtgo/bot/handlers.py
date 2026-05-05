@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = (
     "사용법:\n"
     "/setup — 자격증명 등록 (Claude API 키, 철도사 ID/PW, 카드)\n"
+    "/cards — 카드 목록·추가·삭제\n"
     "/cancel — 진행 중 예약 시도·예약 취소\n"
     "/help — 도움말\n\n"
     "그 외에는 자유롭게 말하세요. 예: '내일 오후 6시 부산에서 서울 KTX'"
@@ -545,6 +546,94 @@ async def _handle_pay_card(cq, tid: int, card_id: str) -> None:
         await cq.edit_message_text("결제 완료. 승차권은 SRT/코레일 앱에서 확인해주세요.")
     else:
         await cq.edit_message_text("결제 실패 (카드 정보 확인 필요).")
+
+
+def _cards_keyboard(cards: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🗑 {_card_display(c)}",
+                              callback_data=f"cards:del:{c['id']}")]
+        for c in cards
+    ]
+    rows.append([InlineKeyboardButton("➕ 카드 추가", callback_data="cards:add")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _cards_list_text(cards: list[dict]) -> str:
+    if not cards:
+        return "등록된 카드가 없어요. ➕ 카드 추가 버튼을 눌러주세요."
+    lines = ["등록된 카드:"]
+    for c in cards:
+        lines.append(f"- {_card_display(c)}")
+    return "\n".join(lines)
+
+
+def _del_confirm_keyboard(card_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("예, 삭제",
+                             callback_data=f"cards:del_confirm:{card_id}"),
+        InlineKeyboardButton("아니오", callback_data="cards:noop"),
+    ]])
+
+
+async def cmd_cards(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ensure_allowed(update):
+        await _block_unallowed(update)
+        return
+
+    tid = update.effective_user.id
+    if not storage.exists(tid):
+        await update.message.reply_text("/setup 부터 해주세요.")
+        return
+
+    cards = storage.list_cards(tid)
+    await update.message.reply_text(
+        _cards_list_text(cards),
+        reply_markup=_cards_keyboard(cards),
+    )
+
+
+async def on_cards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """cards:del:<id>, cards:del_confirm:<id>, cards:noop 처리.
+
+    cards:add 는 별도 ConversationHandler 진입점으로 등록됨.
+    """
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+
+    if cq.data.startswith("cards:del_confirm:"):
+        card_id = cq.data.removeprefix("cards:del_confirm:")
+        storage.remove_card(tid, card_id)
+        cards = storage.list_cards(tid)
+        await cq.edit_message_text(
+            _cards_list_text(cards),
+            reply_markup=_cards_keyboard(cards),
+        )
+        return
+
+    if cq.data.startswith("cards:del:"):
+        card_id = cq.data.removeprefix("cards:del:")
+        card = storage.get_card(tid, card_id)
+        if card is None:
+            cards = storage.list_cards(tid)
+            await cq.edit_message_text(
+                _cards_list_text(cards),
+                reply_markup=_cards_keyboard(cards),
+            )
+            return
+        await cq.edit_message_text(
+            f"정말 삭제할까요?\n  {_card_display(card)}",
+            reply_markup=_del_confirm_keyboard(card_id),
+        )
+        return
+
+    if cq.data == "cards:noop":
+        cards = storage.list_cards(tid)
+        await cq.edit_message_text(
+            _cards_list_text(cards),
+            reply_markup=_cards_keyboard(cards),
+        )
+        return
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -48,7 +48,7 @@ async def test_help_lists_commands(monkeypatch):
     update = _make_update(111)
     await handlers.cmd_help(update, MagicMock())
     text = update.message.reply_text.call_args.args[0]
-    for cmd in ["/setup", "/cancel", "/help"]:
+    for cmd in ["/setup", "/cards", "/cancel", "/help"]:
         assert cmd in text
 
 
@@ -662,3 +662,140 @@ def test_card_display_without_label():
     card = {"id": "ab12", "label": None, "number": "1111222233334444",
             "password": "x", "birthday": "x", "expire": "x"}
     assert handlers._card_display(card) == "*4444"
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_blocks_unallowed(monkeypatch):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers
+    update = _make_update(999)
+    await handlers.cmd_cards(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "허용" in text
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_requires_setup(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "/setup" in text
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_lists_existing_cards(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+        {"id": "cd34", "label": None, "number": "5555666677778888",
+         "password": "34", "birthday": "900202", "expire": "0631"},
+    ]})
+
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+
+    kwargs = update.message.reply_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+    text = update.message.reply_text.call_args.args[0]
+    # 화면에 표시된 라벨이 양쪽 카드 모두 포함
+    assert "신한" in text or kwargs["reply_markup"].inline_keyboard  # 키보드에라도 표시
+
+
+@pytest.mark.asyncio
+async def test_cmd_cards_with_zero_cards_shows_only_add(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": []})
+
+    update = _make_update(111)
+    await handlers.cmd_cards(update, MagicMock())
+
+    kwargs = update.message.reply_text.call_args.kwargs
+    keyboard = kwargs["reply_markup"].inline_keyboard
+    # 마지막 행에 ➕ 카드 추가 버튼
+    last_row = keyboard[-1]
+    assert any("추가" in btn.text for btn in last_row)
+
+
+@pytest.mark.asyncio
+async def test_on_cards_del_shows_confirmation(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:del:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "삭제" in text
+    # 카드는 아직 그대로 (확인 단계만)
+    assert len(storage.list_cards(111)) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_cards_del_confirm_removes_card(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": "신한", "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:del_confirm:ab12"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    assert storage.list_cards(111) == []
+    # 화면이 목록으로 갱신됨 (카드 0장 → 추가 버튼만)
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_on_cards_noop_returns_to_list(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    from srtgo.bot import handlers, storage
+    storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": None, "ktx": None, "cards": [
+        {"id": "ab12", "label": None, "number": "1111222233334444",
+         "password": "12", "birthday": "900101", "expire": "1230"},
+    ]})
+
+    update = MagicMock()
+    update.effective_user.id = 111
+    update.callback_query = MagicMock()
+    update.callback_query.data = "cards:noop"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+
+    await handlers.on_cards_callback(update, MagicMock())
+
+    # 카드 그대로 + 화면이 목록으로 복귀
+    assert len(storage.list_cards(111)) == 1
+    kwargs = update.callback_query.edit_message_text.call_args.kwargs
+    assert "reply_markup" in kwargs
