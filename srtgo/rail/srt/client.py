@@ -15,7 +15,7 @@ except ImportError:
 from ..base import AbstractRail
 from .constants import (
     API_ENDPOINTS, DEFAULT_HEADERS, EMAIL_REGEX, PHONE_NUMBER_REGEX,
-    RESERVE_JOBID, STATION_CODE, NetFunnelConfig,
+    RESERVE_JOBID, STATION_CODE, NetFunnelConfig, normalize_station,
 )
 from .models import (
     Adult, Passenger, SeatType,
@@ -211,6 +211,8 @@ class SRT(AbstractRail):
         available_only: bool = True,
         include_no_seats: bool = False,
     ) -> list[SRTTrain]:
+        dep = normalize_station(dep)
+        arr = normalize_station(arr)
         if dep not in STATION_CODE or arr not in STATION_CODE:
             raise ValueError(f'Invalid station: "{dep}" or "{arr}"')
 

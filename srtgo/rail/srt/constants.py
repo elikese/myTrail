@@ -77,6 +77,23 @@ STATION_CODE = {
 
 STATION_NAME = {code: name for name, code in STATION_CODE.items()}
 
+# --- 역 별칭 ---
+# 사용자 자연어 입력 → 정식 STATION_CODE 키.
+# 사용자가 "울산"이라 부르지만 SRT 정식 키는 "울산(통도사)"인 식의 미스매치 해소.
+STATION_ALIAS = {
+    "울산": "울산(통도사)",
+    "통도사": "울산(통도사)",
+    "여수": "여수EXPO",
+    "김천": "김천(구미)",
+    "구미": "김천(구미)",
+    "광주": "광주송정",
+}
+
+
+def normalize_station(name: str) -> str:
+    """별칭이면 정식 역명으로, 아니면 그대로 반환."""
+    return STATION_ALIAS.get(name, name)
+
 # --- 열차 이름 코드 ---
 TRAIN_NAME = {
     "00": "KTX",
