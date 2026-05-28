@@ -45,8 +45,11 @@ def is_seat_available(train, seat_option) -> bool:
         return train.has_special_seat()
 
 
-def _sleep(cancel_event: threading.Event | None = None) -> None:
-    interval = gammavariate(RESERVE_INTERVAL_SHAPE, RESERVE_INTERVAL_SCALE) + RESERVE_INTERVAL_MIN
+def _calc_sleep_interval() -> float:
+    return gammavariate(RESERVE_INTERVAL_SHAPE, RESERVE_INTERVAL_SCALE) + RESERVE_INTERVAL_MIN
+
+
+def _sleep(interval: float, cancel_event: threading.Event | None = None) -> None:
     logger.debug("슬립: %.2fs", interval)
     if cancel_event is None:
         time.sleep(interval)
@@ -63,6 +66,7 @@ def poll_and_reserve(
     on_success,
     on_error,
     cancel_event: threading.Event | None = None,
+    progress: dict | None = None,
 ) -> None:
     """폴링 루프.
 
@@ -74,9 +78,16 @@ def poll_and_reserve(
         on_success: (reservation) → None 콜백 — 성공 시 호출
         on_error: (exception) → bool 콜백 — True면 계속, False면 중단
         cancel_event: set() 시 다음 루프 진입 시점에 폴링 종료 (None이면 무한 폴링)
+        progress: 진행상황 공유용 mutable dict. None이면 추적 안 함.
+                  키: start_time, attempts, last_sleep, last_sleep_set_at
     """
     i_try = 0
     start_time = time.time()
+    if progress is not None:
+        progress["start_time"] = start_time
+        progress["attempts"] = 0
+        progress["last_sleep"] = 0.0
+        progress["last_sleep_set_at"] = start_time
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -85,6 +96,8 @@ def poll_and_reserve(
 
         i_try += 1
         elapsed = time.time() - start_time
+        if progress is not None:
+            progress["attempts"] = i_try
         logger.debug("예매 시도 #%d (경과: %.0fs)", i_try, elapsed)
 
         try:
@@ -95,11 +108,19 @@ def poll_and_reserve(
                     reservation = rail.reserve(trains[idx], option=seat_option)
                     on_success(reservation)
                     return
-            _sleep(cancel_event)
+            interval = _calc_sleep_interval()
+            if progress is not None:
+                progress["last_sleep"] = interval
+                progress["last_sleep_set_at"] = time.time()
+            _sleep(interval, cancel_event)
 
         except Exception as e:
             logger.error("예매 폴링 중 오류: %s", e, exc_info=True)
             should_continue = on_error(e)
             if not should_continue:
                 return
-            _sleep(cancel_event)
+            interval = _calc_sleep_interval()
+            if progress is not None:
+                progress["last_sleep"] = interval
+                progress["last_sleep_set_at"] = time.time()
+            _sleep(interval, cancel_event)

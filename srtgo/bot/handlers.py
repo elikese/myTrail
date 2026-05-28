@@ -276,11 +276,16 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = f"{pending} / {text}"
 
     try:
-        intent = parser.parse(text=text, today=today, api_key=api_key)
+        parsed = parser.parse(text=text, today=today, api_key=api_key)
     except parser.ParseError as e:
         await update.message.reply_text(f"이해 못 했어요. 다시 말해주세요.\n({e})")
         return
 
+    if parsed.get("type") == "status":
+        await _handle_status_query(update, tid)
+        return
+
+    intent = parsed["intent"]
     if intent.get("needs_clarification"):
         # 다음 메시지 때 합치도록 현 텍스트 보관 (일회성)
         context.user_data["pending_text"] = text
@@ -349,6 +354,7 @@ def _passengers_to_list(rail_type: str, p: dict) -> list:
 
 import asyncio
 import threading
+import time as _time
 
 from . import session as _session_mod
 from . import notifier
@@ -356,6 +362,84 @@ from ..service import reservation as svc_resv
 
 
 _SESSION = _session_mod.Session()
+
+
+_WEEKDAY = "월화수목금토일"
+
+
+def _train_short_name(train) -> str:
+    """SRT/KTX Train → '회사 번호 (출발시각)' 같은 짧은 표시명.
+
+    Duck typing — SRTTrain은 train_number, KTX Train은 train_no.
+    """
+    dep_time = getattr(train, "dep_time", None)
+    time_part = ""
+    if dep_time and len(dep_time) >= 4:
+        time_part = f" ({dep_time[:2]}:{dep_time[2:4]})"
+    if hasattr(train, "train_number"):
+        name = getattr(train, "train_name", "SRT")
+        return f"{name} {train.train_number}{time_part}"
+    if hasattr(train, "train_no"):
+        name = getattr(train, "train_type_name", "KTX") or "KTX"
+        return f"{name[:3]} {train.train_no}{time_part}"
+    s = str(train)
+    return s if len(s) <= 40 else s[:40] + "…"
+
+
+def _format_elapsed(secs: float) -> str:
+    secs = max(0, int(secs))
+    if secs < 60:
+        return f"{secs}초"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}분 {s}초"
+    h, m = divmod(m, 60)
+    return f"{h}시간 {m}분 {s}초"
+
+
+def _format_status_message(progress: dict) -> str:
+    rail_type = progress["rail_type"]
+    dep = progress["dep"]
+    arr = progress["arr"]
+    date = progress["date"]      # "YYYYMMDD"
+    time_s = progress["time"]    # "HHMMSS"
+
+    try:
+        d = _dt.date(int(date[:4]), int(date[4:6]), int(date[6:8]))
+        date_disp = f"{d.month}/{d.day}({_WEEKDAY[d.weekday()]})"
+    except (ValueError, IndexError):
+        date_disp = date
+    time_disp = f"{time_s[:2]}:{time_s[2:4]}" if len(time_s) >= 4 else time_s
+
+    now = _time.time()
+    elapsed = now - progress["start_time"]
+    eta = max(0.0, progress["last_sleep"] - (now - progress["last_sleep_set_at"]))
+
+    trains_disp = ", ".join(progress["selected_trains"]) or "(없음)"
+
+    lines = [
+        f"🚄 {dep} → {arr}",
+        f"📅 {date_disp} {time_disp} 이후 {rail_type}",
+        f"선택 열차: {trains_disp}",
+        f"#{progress['attempts']}회 시도, {_format_elapsed(elapsed)} 경과",
+        f"다음 시도까지 ~{eta:.0f}초",
+    ]
+    return "\n".join(lines)
+
+
+async def _handle_status_query(update: Update, tid: int) -> None:
+    progress = _SESSION.get_progress(tid)
+    pending = _SESSION.get_pending(tid)
+
+    if progress is not None:
+        await update.message.reply_text(_format_status_message(progress))
+        return
+    if pending is not None:
+        await update.message.reply_text(
+            "좌석 잡고 결제 대기 중이에요. 위 메시지에서 결제/취소 눌러주세요."
+        )
+        return
+    await update.message.reply_text("진행 중인 작업이 없어요.")
 
 
 def _resolve_indices(data: str, n_trains: int) -> list[int] | None:
@@ -418,6 +502,22 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot = context.application.bot
     loop = asyncio.get_running_loop()
 
+    progress = {
+        "rail_type": search["rail_type"],
+        "dep": search["search_params"]["dep"],
+        "arr": search["search_params"]["arr"],
+        "date": search["search_params"]["date"],
+        "time": search["search_params"]["time"],
+        "selected_trains": [
+            _train_short_name(search["trains"][i]) for i in indices
+        ],
+        # poll_and_reserve가 채움
+        "start_time": 0.0,
+        "attempts": 0,
+        "last_sleep": 0.0,
+        "last_sleep_set_at": 0.0,
+    }
+
     def on_success(reservation):
         _SESSION.clear_pending(tid)
         _SESSION.set_pending(tid, {"reservation": reservation, "rail": search["rail"]})
@@ -441,10 +541,11 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             svc_resv.poll_and_reserve,
             search["rail"], search["search_params"], indices,
             search["seat_option"], on_success, on_error, cancel_event,
+            progress,
         )
 
     task = asyncio.create_task(runner())
-    _SESSION.start_poll(tid, task, cancel_event)
+    _SESSION.start_poll(tid, task, cancel_event, progress)
     context.user_data.pop("search", None)
     await cq.edit_message_text("예약 시도 시작. 좌석 잡히면 알림 드립니다.")
 

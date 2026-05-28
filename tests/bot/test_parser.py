@@ -46,12 +46,13 @@ def test_parse_basic_korean():
         api_key="sk-x",
         client=fake_client,
     )
-    assert result == intent
+    assert result == {"type": "reserve", "intent": intent}
 
-    # tool_choice가 강제됐는지 확인
+    # 두 툴 모두 등록되고 tool_choice="any"인지 확인
     call_kwargs = fake_client.messages.create.call_args.kwargs
-    assert call_kwargs["tool_choice"] == {"type": "tool", "name": "submit_intent"}
-    assert call_kwargs["tools"][0]["name"] == "submit_intent"
+    assert call_kwargs["tool_choice"] == {"type": "any"}
+    tool_names = {t["name"] for t in call_kwargs["tools"]}
+    assert tool_names == {"submit_intent", "query_status"}
 
 
 def test_parse_no_tool_use_block_raises():
@@ -93,4 +94,23 @@ def test_parse_propagates_needs_clarification():
     fake_client.messages.create.return_value = _mock_tool_use_response(intent)
 
     result = parser.parse("부산 서울 SRT", today="2026-05-04", api_key="sk", client=fake_client)
-    assert result["needs_clarification"] == ["time"]
+    assert result["type"] == "reserve"
+    assert result["intent"]["needs_clarification"] == ["time"]
+
+
+def test_parse_routes_status_query():
+    """query_status 툴 호출 시 status 타입으로 라우팅."""
+    from srtgo.bot import parser
+
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_tool_use_response(
+        {}, tool_name="query_status"
+    )
+
+    result = parser.parse(
+        text="아직이야?",
+        today="2026-05-04",
+        api_key="sk",
+        client=fake_client,
+    )
+    assert result == {"type": "status", "intent": None}

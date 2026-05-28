@@ -38,18 +38,36 @@ INTENT_SCHEMA = {
 }
 
 TOOL_NAME = "submit_intent"
+STATUS_TOOL_NAME = "query_status"
 
 INTENT_TOOL = {
     "name": TOOL_NAME,
-    "description": "사용자가 요청한 한국 철도 예매 의도를 구조화해 제출한다.",
+    "description": "사용자가 새 예매를 요청할 때 호출 — 출발지·도착지·시각 등 예매 의도를 구조화해 제출.",
     "input_schema": INTENT_SCHEMA,
 }
 
+QUERY_STATUS_TOOL = {
+    "name": STATUS_TOOL_NAME,
+    "description": (
+        "사용자가 진행 중인 예약 시도의 현재 상태를 물을 때 호출. "
+        "예: '아직이야?', '하고 있어?', '어떻게 됐어?', '성공했어?', '잡았어?', '진행 어떻게 돼?'. "
+        "새로운 예매 요청이 아닌, 이미 시작된 시도의 상황 확인 의도일 때만."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
 SYSTEM_PROMPT = """당신은 한국 철도 예매 봇의 의도 파서입니다.
-사용자의 한국어 자연어 입력을 submit_intent 도구로 제출하세요.
+사용자의 한국어 자연어 입력을 보고 두 툴 중 정확히 하나를 호출하세요:
+- submit_intent: 새 예매를 요청하는 메시지 ("부산에서 서울 내일 6시", "표 잡아줘" 등).
+- query_status: 진행 중인 예매 시도가 어떻게 되어 가는지 묻는 메시지
+  ("아직이야?", "하고 있어?", "어떻게 됐어?", "성공했어?", "잡았어?" 등).
 도구를 반드시 호출해야 하며, 다른 형태의 응답은 허용되지 않습니다.
 
-해석 규칙 (적극적으로 추론·기본값 채우기):
+submit_intent 해석 규칙 (적극적으로 추론·기본값 채우기):
 - 시각 표현
   - "오후 N시" → (N+12):00 (예: 오후 8시 → 200000, 오후 1시 → 130000). N이 12면 그대로 12 (정오).
   - "오전 N시" → N:00 (예: 오전 9시 → 090000). 오전 12시는 0시 (000000).
@@ -101,7 +119,12 @@ def parse(
     api_key: str,
     client: Anthropic | None = None,
 ) -> dict:
-    """자연어 → intent dict. tool use로 스키마 보장."""
+    """자연어 → 라우팅된 의도.
+
+    리턴 형식:
+        {"type": "reserve", "intent": {...INTENT_SCHEMA...}}
+        {"type": "status",  "intent": None}
+    """
     if client is None:
         client = Anthropic(api_key=api_key)
 
@@ -115,15 +138,19 @@ def parse(
                 {"type": "text", "text": system,
                  "cache_control": {"type": "ephemeral"}},
             ],
-            tools=[INTENT_TOOL],
-            tool_choice={"type": "tool", "name": TOOL_NAME},
+            tools=[INTENT_TOOL, QUERY_STATUS_TOOL],
+            tool_choice={"type": "any"},
             messages=[{"role": "user", "content": text}],
         )
     except Exception as e:
         raise ParseError(f"Claude API 호출 실패: {e}") from e
 
     for block in resp.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == TOOL_NAME:
-            return dict(block.input)
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        if block.name == TOOL_NAME:
+            return {"type": "reserve", "intent": dict(block.input)}
+        if block.name == STATUS_TOOL_NAME:
+            return {"type": "status", "intent": None}
 
     raise ParseError(f"tool_use 블록 미발견: {resp.content!r}")

@@ -63,3 +63,39 @@ def test_cancel_event_none_keeps_existing_behavior():
     )
 
     on_success.assert_called_once_with("RES")
+
+
+def test_progress_dict_updated_each_attempt():
+    """progress 인자가 매 시도마다 attempts/start_time/last_sleep을 채운다."""
+    rail = MagicMock()
+    rail.search_train.return_value = []  # 좌석 없음 → 슬립 후 재시도
+
+    cancel_event = threading.Event()
+    progress: dict = {}
+
+    def cancel_after_few_attempts():
+        # 짧게 기다리고 취소 — 최소 1번 이상 시도 보장
+        import time as _t
+        _t.sleep(0.3)
+        cancel_event.set()
+
+    canceller = threading.Thread(target=cancel_after_few_attempts, daemon=True)
+    canceller.start()
+
+    poll_and_reserve(
+        rail,
+        search_params={"dep": "x", "arr": "y", "date": "20260505",
+                       "time": "180000", "passengers": []},
+        train_indices=[0],
+        seat_option=None,
+        on_success=MagicMock(),
+        on_error=MagicMock(return_value=True),
+        cancel_event=cancel_event,
+        progress=progress,
+    )
+    canceller.join(timeout=5)
+
+    assert progress["attempts"] >= 1
+    assert progress["start_time"] > 0
+    assert progress["last_sleep"] >= 0
+    assert progress["last_sleep_set_at"] >= progress["start_time"]

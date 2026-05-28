@@ -11,7 +11,7 @@ class AlreadyPolling(Exception):
 
 class Session:
     def __init__(self) -> None:
-        self._polls: dict[int, tuple[asyncio.Task, threading.Event]] = {}
+        self._polls: dict[int, tuple[asyncio.Task, threading.Event, dict | None]] = {}
         self._pending: dict[int, dict] = {}
 
     def start_poll(
@@ -19,10 +19,11 @@ class Session:
         telegram_id: int,
         task: asyncio.Task,
         cancel_event: threading.Event,
+        progress: dict | None = None,
     ) -> None:
         if self.is_polling(telegram_id):
             raise AlreadyPolling(f"tid={telegram_id} 이미 폴링 중")
-        self._polls[telegram_id] = (task, cancel_event)
+        self._polls[telegram_id] = (task, cancel_event, progress)
         task.add_done_callback(lambda _t: self._polls.pop(telegram_id, None))
 
     def is_polling(self, telegram_id: int) -> bool:
@@ -33,10 +34,17 @@ class Session:
         entry = self._polls.pop(telegram_id, None)
         if entry is None:
             return False
-        task, event = entry
+        _, event, _ = entry
         event.set()
         # task 자체는 to_thread 종료 후 자연 완료 — 강제 cancel은 불필요
         return True
+
+    def get_progress(self, telegram_id: int) -> dict | None:
+        """진행 중 폴링의 progress dict (없으면 None)."""
+        entry = self._polls.get(telegram_id)
+        if entry is None or entry[0].done():
+            return None
+        return entry[2]
 
     def set_pending(self, telegram_id: int, payload: dict) -> None:
         """payload 키: {reservation, rail}"""

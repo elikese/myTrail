@@ -50,6 +50,34 @@ def test_pending_set_get_clear():
 
 
 @pytest.mark.asyncio
+async def test_get_progress_returns_dict_during_polling():
+    from srtgo.bot import session
+
+    sess = session.Session()
+    cancel_event = threading.Event()
+    progress = {"attempts": 5, "start_time": 100.0,
+                "last_sleep": 3.0, "last_sleep_set_at": 102.0}
+
+    async def dummy():
+        await asyncio.sleep(0.5)
+
+    sess.start_poll(1, asyncio.create_task(dummy()), cancel_event, progress)
+    assert sess.get_progress(1) is progress
+
+    sess.cancel_poll(1)
+    await asyncio.sleep(0.1)
+    # 폴링 종료 후엔 None
+    assert sess.get_progress(1) is None
+
+
+def test_get_progress_returns_none_when_no_polling():
+    from srtgo.bot import session
+
+    sess = session.Session()
+    assert sess.get_progress(999) is None
+
+
+@pytest.mark.asyncio
 async def test_finished_task_clears_polling_slot():
     from srtgo.bot import session
 
