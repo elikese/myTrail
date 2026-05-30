@@ -95,52 +95,63 @@ async def test_setup_full_flow_saves_credentials(monkeypatch, tmp_user_dir, fern
 
 
 @pytest.mark.asyncio
-async def test_freemsg_parses_and_searches(monkeypatch, tmp_user_dir, fernet_key):
+async def test_freemsg_invokes_agent_with_context(monkeypatch, tmp_user_dir, fernet_key):
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
     from srtgo.bot import handlers, storage
     storage._reset_cipher_for_tests()
+    storage.save(111, {"srt": {"id": "u", "pw": "p"}, "ktx": None, "cards": []})
 
-    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
-    storage.save(111, {
-        "srt": {"id": "u", "pw": "p"},
-        "ktx": None,
-        "cards": [
-            {"id": "ab12", "label": None, "number": "1", "password": "2",
-             "birthday": "3", "expire": "4"}
-        ],
-    })
+    captured = {}
 
-    intent = {
-        "rail": "SRT", "dep": "부산", "arr": "서울",
-        "date": "2026-05-05", "time": "180000",
-        "passengers": {"adult": 1, "child": 0, "senior": 0},
-        "seat_pref": "GENERAL_FIRST", "needs_clarification": [],
-    }
-    monkeypatch.setattr("srtgo.bot.parser.parse",
-                        lambda **_kw: {"type": "reserve", "intent": intent})
+    async def fake_run_agent(ctx, text, **kw):
+        captured["tid"] = ctx.tid
+        captured["text"] = text
+        captured["creds"] = ctx.creds
 
-    train1 = MagicMock(); train1.__repr__ = lambda s: "SRT 123 18:00"
-    train2 = MagicMock(); train2.__repr__ = lambda s: "SRT 125 18:30"
-    rail = MagicMock(); rail.search_train.return_value = [train1, train2]
-    monkeypatch.setattr("srtgo.service.auth.create_rail",
-                        lambda rail_type, credentials, debug=False: rail)
+    monkeypatch.setattr(handlers.agent, "run_agent", fake_run_agent)
 
     update = _make_update(111, "내일 오후 6시 부산 서울")
     context = MagicMock()
     context.user_data = {}
     await handlers.on_free_message(update, context)
 
-    # 후보 메시지 + 인라인 키보드 호출됨
-    update.message.reply_text.assert_called()
-    kwargs = update.message.reply_text.call_args.kwargs
-    assert "reply_markup" in kwargs
-    # 세션에 검색 결과 저장
-    assert context.user_data["search"]["rail"] is rail
-    assert len(context.user_data["search"]["trains"]) == 2
+    assert captured["tid"] == 111
+    assert captured["text"] == "내일 오후 6시 부산 서울"
+    assert captured["creds"]["srt"] == {"id": "u", "pw": "p"}
 
 
 @pytest.mark.asyncio
-async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_key):
+async def test_freemsg_blocks_unallowed(monkeypatch):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "999")
+    from srtgo.bot import handlers
+
+    update = _make_update(111, "안녕")
+    context = MagicMock()
+    context.user_data = {}
+    await handlers.on_free_message(update, context)
+
+    update.message.reply_text.assert_called_once()
+    assert "허용되지 않은" in update.message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_freemsg_without_claude_key_errors(monkeypatch, tmp_user_dir, fernet_key):
+    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
+    monkeypatch.delenv("BOT_CLAUDE_KEY", raising=False)
+    from srtgo.bot import handlers
+
+    update = _make_update(111, "안녕")
+    context = MagicMock()
+    context.user_data = {}
+    await handlers.on_free_message(update, context)
+
+    update.message.reply_text.assert_called_once()
+    assert "BOT_CLAUDE_KEY" in update.message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_pick_callback_starts_polling(monkeypatch, tmp_user_dir, fernet_key, fake_redis):
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, session as session_mod
 
@@ -401,7 +412,7 @@ async def test_setup_srt_rejects_invalid_format(monkeypatch, tmp_user_dir, ferne
 
 
 @pytest.mark.asyncio
-async def test_on_pick_permanent_error_terminates_polling(monkeypatch, tmp_user_dir, fernet_key):
+async def test_on_pick_permanent_error_terminates_polling(monkeypatch, tmp_user_dir, fernet_key, fake_redis):
     monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
     from srtgo.bot import handlers, session as session_mod
     handlers._SESSION = session_mod.Session()
@@ -545,64 +556,6 @@ async def test_pick_all_resolves_to_current_page_indices():
     # 0페이지 (10개 가득)
     indices = handlers._resolve_indices("pick:all:0", 15)
     assert indices == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-
-
-@pytest.mark.asyncio
-async def test_clarification_round_trip_concats_messages(monkeypatch, tmp_user_dir, fernet_key):
-    """1차 메시지가 needs_clarification 받으면 2차 메시지를 합쳐서 재파싱한다."""
-    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
-    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
-    from srtgo.bot import handlers, storage
-    storage._reset_cipher_for_tests()
-    storage.save(111, {
-        "srt": {"id": "u", "pw": "p"}, "ktx": None,
-        "cards": [
-            {"id": "ab12", "label": None, "number": "1", "password": "2",
-             "birthday": "3", "expire": "4"}
-        ],
-    })
-
-    # 1차 응답: time 누락
-    intent_first = {
-        "rail": "SRT", "dep": "부산", "arr": "대전",
-        "date": "2026-05-04", "time": "000000",
-        "passengers": {"adult": 1, "child": 0, "senior": 0},
-        "seat_pref": "GENERAL_FIRST", "needs_clarification": ["time"],
-    }
-    # 2차 응답: 합쳐진 텍스트로 완전한 intent
-    intent_second = {
-        "rail": "SRT", "dep": "부산", "arr": "대전",
-        "date": "2026-05-04", "time": "200000",
-        "passengers": {"adult": 1, "child": 0, "senior": 0},
-        "seat_pref": "GENERAL_FIRST", "needs_clarification": [],
-    }
-
-    parsed_texts = []
-    def fake_parse(*, text, **_kw):
-        parsed_texts.append(text)
-        chosen = intent_first if len(parsed_texts) == 1 else intent_second
-        return {"type": "reserve", "intent": chosen}
-    monkeypatch.setattr("srtgo.bot.parser.parse", fake_parse)
-
-    rail = MagicMock()
-    rail.search_train.return_value = [MagicMock()]
-    monkeypatch.setattr("srtgo.service.auth.create_rail",
-                        lambda rail_type, credentials, debug=False: rail)
-
-    context = MagicMock()
-    context.user_data = {}
-
-    # 1차: 모호함 → pending 저장
-    upd1 = _make_update(111, "부산에서 대전")
-    await handlers.on_free_message(upd1, context)
-    assert context.user_data.get("pending_text") == "부산에서 대전"
-    assert "명확" in upd1.message.reply_text.call_args.args[0]
-
-    # 2차: 명확화 답변 → 이전 텍스트와 합쳐서 재파싱 → 성공
-    upd2 = _make_update(111, "오후 8시")
-    await handlers.on_free_message(upd2, context)
-    assert parsed_texts[1] == "부산에서 대전 / 오후 8시"
-    assert "pending_text" not in context.user_data   # 성공 후 자동 정리
 
 
 @pytest.mark.asyncio
@@ -941,92 +894,6 @@ def test_format_status_message_contains_key_fields():
     assert "#142" in msg
     assert "5분 12초" in msg
     assert "다음 시도까지 ~3초" in msg
-
-
-@pytest.mark.asyncio
-async def test_freemsg_routes_status_query_to_progress_reply(monkeypatch, tmp_user_dir, fernet_key):
-    """파서가 type=status 리턴하면 _handle_status_query 경로로 가서 진행상황 답변."""
-    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
-    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
-    from srtgo.bot import handlers, storage, session as session_mod
-    storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": {"id": "u", "pw": "p"}, "ktx": None, "cards": []})
-
-    monkeypatch.setattr("srtgo.bot.parser.parse",
-                        lambda **_kw: {"type": "status", "intent": None})
-
-    handlers._SESSION = session_mod.Session()
-    # 진행 중 폴링 시뮬레이션
-    import asyncio as _aio
-    cancel_event = threading.Event()
-    async def dummy():
-        await _aio.sleep(1)
-    task = _aio.create_task(dummy())
-    now = __import__("time").time()
-    progress = {
-        "rail_type": "SRT", "dep": "부산", "arr": "서울",
-        "date": "20260505", "time": "180000",
-        "selected_trains": ["SRT 1810 (18:00)"],
-        "start_time": now - 30, "attempts": 7,
-        "last_sleep": 4.0, "last_sleep_set_at": now - 1,
-    }
-    handlers._SESSION.start_poll(111, task, cancel_event, progress)
-
-    update = _make_update(111, "아직이야?")
-    context = MagicMock()
-    context.user_data = {}
-    await handlers.on_free_message(update, context)
-
-    text = update.message.reply_text.call_args.args[0]
-    assert "#7" in text and "부산 → 서울" in text
-
-    cancel_event.set()
-    task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_freemsg_status_query_with_pending_payment(monkeypatch, tmp_user_dir, fernet_key):
-    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
-    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
-    from srtgo.bot import handlers, storage, session as session_mod
-    storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": {"id": "u", "pw": "p"}, "ktx": None, "cards": []})
-
-    monkeypatch.setattr("srtgo.bot.parser.parse",
-                        lambda **_kw: {"type": "status", "intent": None})
-
-    handlers._SESSION = session_mod.Session()
-    handlers._SESSION.set_pending(111, {"reservation": MagicMock(), "rail": MagicMock()})
-
-    update = _make_update(111, "어떻게 됐어?")
-    context = MagicMock()
-    context.user_data = {}
-    await handlers.on_free_message(update, context)
-
-    text = update.message.reply_text.call_args.args[0]
-    assert "결제" in text
-
-
-@pytest.mark.asyncio
-async def test_freemsg_status_query_with_nothing_active(monkeypatch, tmp_user_dir, fernet_key):
-    monkeypatch.setenv("BOT_ALLOWED_IDS", "111")
-    monkeypatch.setenv("BOT_CLAUDE_KEY", "sk-test")
-    from srtgo.bot import handlers, storage, session as session_mod
-    storage._reset_cipher_for_tests()
-    storage.save(111, {"srt": {"id": "u", "pw": "p"}, "ktx": None, "cards": []})
-
-    monkeypatch.setattr("srtgo.bot.parser.parse",
-                        lambda **_kw: {"type": "status", "intent": None})
-
-    handlers._SESSION = session_mod.Session()
-
-    update = _make_update(111, "잡았어?")
-    context = MagicMock()
-    context.user_data = {}
-    await handlers.on_free_message(update, context)
-
-    text = update.message.reply_text.call_args.args[0]
-    assert "없" in text  # "진행 중인 작업이 없어요"
 
 
 def test_cancel_registration_after_conversations():

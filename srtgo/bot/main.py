@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import handlers, storage
+from . import handlers, storage, memory
 from ..logging.setup import setup_logging
 
 load_dotenv()
@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 def _build_setup_conversation() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("setup", handlers.setup_entry)],
+        entry_points=[
+            CommandHandler("setup", handlers.setup_entry),
+            CallbackQueryHandler(handlers.setup_entry_cb, pattern=r"^setup:start$"),
+        ],
         states={
             handlers.STATE_SRT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.setup_srt),
@@ -73,6 +76,13 @@ async def _send_restart_notice(app: Application) -> None:
             logger.warning("재시작 알림 실패 tid=%d: %s", tid, e)
 
 
+async def _post_init(app: Application) -> None:
+    if not await memory.ping():
+        logger.warning("Redis 연결 실패 — 대화기억/스냅샷 비활성화, 단일턴으로 동작합니다.")
+    await memory.clear_all_transient()  # 재시작으로 고아가 된 진행상태 스냅샷 정리
+    await _send_restart_notice(app)
+
+
 def main() -> None:
     setup_logging(debug=False)
 
@@ -89,7 +99,7 @@ def main() -> None:
     if not os.environ.get("BOT_ALLOWED_IDS"):
         print("경고: BOT_ALLOWED_IDS 비어있음 — 모든 사용자 차단됨", file=sys.stderr)
 
-    app = Application.builder().token(token).post_init(_send_restart_notice).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start", handlers.cmd_start))
     app.add_handler(CommandHandler("help", handlers.cmd_help))

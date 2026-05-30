@@ -1,0 +1,13 @@
+# 이미지에 굽지 않을 것 (.env·data 는 런타임 주입/마운트)
+.git/
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.env
+.env.*
+data/
+screenshot/
+docs/
+tests/
