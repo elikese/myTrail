@@ -46,6 +46,11 @@ dev = [
 [tool.setuptools_scm]
 fallback_version = "0.0.1"
 
+[tool.setuptools.packages.find]
+# srtgo 패키지만 명시 — 런타임에 생기는 data/ (BOT_USERS_DIR 기본값) 등이
+# flat-layout 자동탐색을 깨뜨려 "Multiple top-level packages" 빌드 오류를 내는 것 방지.
+include = ["srtgo*"]
+
 [project.urls]
 Homepage = "https://github.com/lapis42/srtgo"
 
