@@ -1,0 +1,29 @@
+# srtgo 봇 + Redis 통합 스택. `docker compose up -d` 로 둘 다 기동.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: srtgo-redis
+    # 인메모리 캐시로만 사용(대화기억은 TTL, 진행상태는 일시적).
+    # 영속(AOF)이 필요하면: command 를 ["redis-server","--appendonly","yes"] 로 바꾸고
+    # volumes 에 - ./data/redis:/data 추가 (./data 는 .gitignore됨).
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: srtgo-bot
+    env_file: .env                      # BOT_TOKEN/BOT_DB_KEY/BOT_CLAUDE_KEY/BOT_ALLOWED_IDS (런타임 주입)
+    environment:
+      - REDIS_URL=redis://redis:6379/0  # compose 네트워크 서비스명으로 접속
+      - TZ=Asia/Seoul
+    volumes:
+      - ./data:/app/data                # Fernet 암호화 자격증명·카드 영속 (.gitignore됨)
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

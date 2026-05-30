@@ -17,3 +17,15 @@ def fernet_key(monkeypatch):
     key = Fernet.generate_key().decode()
     monkeypatch.setenv("BOT_DB_KEY", key)
     return key
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    """memory.get_async_client를 인메모리 fakeredis로 교체."""
+    import fakeredis.aioredis
+    from srtgo.bot import memory
+
+    memory.reset_clients_for_tests()
+    fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(memory, "get_async_client", lambda: fake)
+    return fake

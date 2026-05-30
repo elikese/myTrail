@@ -87,6 +87,36 @@ async def setup_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return STATE_SRT
 
 
+async def setup_entry_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """setup:start 콜백 진입점 — 자연어 에이전트가 버튼으로 트리거하는 보안 등록 플로우.
+
+    민감정보(ID/PW)는 이 deterministic 플로우로만 받는다. setup_entry의 콜백 버전.
+    """
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+    if not auth_guard.is_allowed(tid):
+        await cq.edit_message_text("허용되지 않은 사용자입니다.")
+        return ConversationHandler.END
+
+    armed = context.user_data.pop("setup_overwrite_armed", False)
+    if storage.exists(tid) and not armed:
+        context.user_data["setup_overwrite_armed"] = True
+        await cq.edit_message_text(
+            "이미 입력된 정보가 있습니다.\n"
+            "덮어쓰려면 '로그인 등록'을 한 번 더 요청하거나 /setup 을 보내주세요."
+        )
+        return ConversationHandler.END
+
+    context.user_data["setup"] = {}
+    await cq.edit_message_text(
+        "자격증명 등록을 시작합니다.\n"
+        "1/4: SRT 아이디·비번을 한 줄에 공백으로 구분해 보내주세요.\n"
+        "사용 안 하면 'skip'. (취소: /cancel)"
+    )
+    return STATE_SRT
+
+
 _INVALID = object()
 
 
@@ -176,8 +206,8 @@ import datetime as _dt
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from . import parser
-from ..service import auth as svc_auth
+from . import agent
+from . import agent_context
 
 
 def _seat_option_from_intent(rail_type: str, pref: str):
@@ -257,83 +287,23 @@ async def on_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _block_unallowed(update)
         return
 
-    tid = update.effective_user.id
-    creds = storage.load(tid)
-    if creds is None:
-        await update.message.reply_text("자격증명 미등록. /setup 부터 해주세요.")
-        return
-
-    text = update.message.text
-    today = _dt.date.today().isoformat()
-    api_key = os.environ.get("BOT_CLAUDE_KEY")
-    if not api_key:
+    if not os.environ.get("BOT_CLAUDE_KEY"):
         await update.message.reply_text("운영자 설정 오류: BOT_CLAUDE_KEY 미설정.")
         return
 
-    # 직전 명확화 답변이면 이전 메시지와 합쳐서 재파싱
-    pending = context.user_data.pop("pending_text", None)
-    if pending:
-        text = f"{pending} / {text}"
-
-    try:
-        parsed = parser.parse(text=text, today=today, api_key=api_key)
-    except parser.ParseError as e:
-        await update.message.reply_text(f"이해 못 했어요. 다시 말해주세요.\n({e})")
-        return
-
-    if parsed.get("type") == "status":
-        await _handle_status_query(update, tid)
-        return
-
-    intent = parsed["intent"]
-    if intent.get("needs_clarification"):
-        # 다음 메시지 때 합치도록 현 텍스트 보관 (일회성)
-        context.user_data["pending_text"] = text
-        fields = ", ".join(intent["needs_clarification"])
-        await update.message.reply_text(f"명확하게 알려주세요: {fields}")
-        return
-
-    rail_type = intent["rail"]
-    cred = creds.get(rail_type.lower())
-    if not cred:
-        await update.message.reply_text(
-            f"{rail_type} 자격증명 미등록. /setup 다시 해주세요."
-        )
-        return
-
-    try:
-        rail = svc_auth.create_rail(rail_type, credentials=cred)
-    except Exception as e:
-        await update.message.reply_text(f"{rail_type} 로그인 실패: {e}")
-        return
-
-    date = intent["date"].replace("-", "")
-    search_params = {
-        "dep": intent["dep"], "arr": intent["arr"],
-        "date": date, "time": intent["time"],
-        "passengers": _passengers_to_list(rail_type, intent["passengers"]),
-        "include_no_seats": True,
-    }
-    try:
-        trains = rail.search_train(**search_params)
-    except Exception as e:
-        await update.message.reply_text(f"검색 실패: {e}")
-        return
-
-    if not trains:
-        await update.message.reply_text("해당 시간대 열차 없음.")
-        return
-
-    context.user_data["search"] = {
-        "rail": rail, "rail_type": rail_type,
-        "trains": trains, "search_params": search_params,
-        "seat_option": _seat_option_from_intent(rail_type, intent["seat_pref"]),
-        "page": 0,
-    }
-    await update.message.reply_text(
-        _format_train_page(trains, 0),
-        reply_markup=_train_keyboard(len(trains), 0),
+    tid = update.effective_user.id
+    ctx = agent_context.AgentContext(
+        tid=tid,
+        update=update,
+        context=context,
+        creds=storage.load(tid) or {},
+        today=_dt.date.today().isoformat(),
     )
+    try:
+        await agent.run_agent(ctx, update.message.text)
+    except Exception:
+        logger.exception("agent 실행 오류")
+        await update.message.reply_text("처리 중 오류가 났어요. 다시 시도해주세요.")
 
 
 def _passengers_to_list(rail_type: str, p: dict) -> list:
@@ -358,6 +328,7 @@ import time as _time
 
 from . import session as _session_mod
 from . import notifier
+from . import memory
 from ..service import reservation as svc_resv
 
 
@@ -427,21 +398,6 @@ def _format_status_message(progress: dict) -> str:
     return "\n".join(lines)
 
 
-async def _handle_status_query(update: Update, tid: int) -> None:
-    progress = _SESSION.get_progress(tid)
-    pending = _SESSION.get_pending(tid)
-
-    if progress is not None:
-        await update.message.reply_text(_format_status_message(progress))
-        return
-    if pending is not None:
-        await update.message.reply_text(
-            "좌석 잡고 결제 대기 중이에요. 위 메시지에서 결제/취소 눌러주세요."
-        )
-        return
-    await update.message.reply_text("진행 중인 작업이 없어요.")
-
-
 def _resolve_indices(data: str, n_trains: int) -> list[int] | None:
     """callback data → 인덱스 목록 또는 None(취소).
 
@@ -478,26 +434,12 @@ async def on_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cq = update.callback_query
-    await cq.answer()
-    tid = update.effective_user.id
+async def _launch_booking(tid: int, context, search: dict, indices: list[int]) -> dict:
+    """선택 열차로 백그라운드 폴링 시작. 버튼(on_pick)·자연어(facade) 양쪽이 공유.
 
-    search = context.user_data.get("search")
-    if not search:
-        await cq.edit_message_text("세션 만료. 다시 요청해주세요.")
-        return
-
-    indices = _resolve_indices(cq.data, len(search["trains"]))
-    if indices is None:
-        await cq.edit_message_text("취소됨.")
-        context.user_data.pop("search", None)
-        return
-
-    if _SESSION.is_polling(tid):
-        await cq.edit_message_text("이미 진행 중인 예약 시도가 있어요. /cancel 후 다시.")
-        return
-
+    살아있는 Task/reservation은 _SESSION(메모리)에, 직렬화 가능한 진행 스냅샷은
+    Redis에 기록한다(시작 시 1회, 성공/취소 시 정리).
+    """
     cancel_event = threading.Event()
     bot = context.application.bot
     loop = asyncio.get_running_loop()
@@ -521,6 +463,16 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     def on_success(reservation):
         _SESSION.clear_pending(tid)
         _SESSION.set_pending(tid, {"reservation": reservation, "rail": search["rail"]})
+        summary = {
+            "rail_type": search["rail_type"],
+            "dep": search["search_params"]["dep"],
+            "arr": search["search_params"]["arr"],
+            "date": search["search_params"]["date"],
+            "time": search["search_params"]["time"],
+            "train": str(reservation)[:80],
+        }
+        asyncio.run_coroutine_threadsafe(memory.set_pending_summary(tid, summary), loop)
+        asyncio.run_coroutine_threadsafe(memory.clear_progress_snapshot(tid), loop)
         asyncio.run_coroutine_threadsafe(
             notifier.send_seat_secured(bot, tid, reservation), loop
         )
@@ -546,6 +498,31 @@ async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     task = asyncio.create_task(runner())
     _SESSION.start_poll(tid, task, cancel_event, progress)
+    await memory.set_progress_snapshot(tid, progress)
+    return progress
+
+
+async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cq = update.callback_query
+    await cq.answer()
+    tid = update.effective_user.id
+
+    search = context.user_data.get("search")
+    if not search:
+        await cq.edit_message_text("세션 만료. 다시 요청해주세요.")
+        return
+
+    indices = _resolve_indices(cq.data, len(search["trains"]))
+    if indices is None:
+        await cq.edit_message_text("취소됨.")
+        context.user_data.pop("search", None)
+        return
+
+    if _SESSION.is_polling(tid):
+        await cq.edit_message_text("이미 진행 중인 예약 시도가 있어요. /cancel 후 다시.")
+        return
+
+    await _launch_booking(tid, context, search, indices)
     context.user_data.pop("search", None)
     await cq.edit_message_text("예약 시도 시작. 좌석 잡히면 알림 드립니다.")
 
